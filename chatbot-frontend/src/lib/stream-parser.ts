@@ -1,40 +1,26 @@
 /**
- * Parses SSE streaming responses from Strands Agents SDK (via AgentCore).
- *
- * Strands SDK event types (from agent.stream() → toJSON()):
- *   modelStreamUpdateEvent  → wraps ModelStreamEvent (text deltas, tool starts, stop)
- *   contentBlockEvent       → completed content block (text with thinking stripped)
- *   beforeToolCallEvent     → tool about to execute
- *   afterToolCallEvent      → tool finished executing
- *   agentResultEvent        → final result
+ * Parses the Strands SDK's SSE events, as re-streamed by the BFF. The shapes handled below come from
+ * `agent.stream() → toJSON()`; anything unrecognized is skipped rather than treated as an error.
  */
 
 export interface StreamCallbacks {
-  /** Called for each visible text token (token-by-token). */
+  /** One visible text token, with `<thinking>` already stripped. */
   onToken: (text: string) => void
-  /** Called when a tool starts executing. */
   onToolStart: (toolName: string) => void
-  /** Called when the model is thinking/reasoning. */
   onThinking: (text: string) => void
-  /** Called with a status label (e.g. "Using get_current_time", "Streaming..."). */
+  /** A status label, e.g. `Using get_current_time`. */
   onStatus: (status: string) => void
-  /** Called when the stream completes. */
   onComplete: () => void
-  /** Called on error. */
   onError: (error: Error) => void
 }
 
-/**
- * Strips inline `<thinking>...</thinking>` blocks from streamed text,
- * handling tags that arrive split across multiple tokens.
- */
+/** Strips `<thinking>…</thinking>` from streamed text, including tags split across tokens. */
 function createThinkingFilter(callbacks: StreamCallbacks) {
   let inThinking = false
   let tagBuffer = ''
   let hasEmittedVisible = false
 
   function emitVisible(text: string) {
-    // Strip leading whitespace before the first visible content
     if (!hasEmittedVisible) {
       text = text.replace(/^\s+/, '')
       if (!text) return
@@ -59,8 +45,7 @@ function createThinkingFilter(callbacks: StreamCallbacks) {
             hasEmittedVisible = false // reset so leading whitespace after thinking is stripped
             callbacks.onStatus('Streaming...')
           } else {
-            // A trailing `<` may be the start of `</thinking>` split across tokens, so hold
-            // back only as much as the tag could still need and emit the rest.
+            // A trailing `<` may be a split `</thinking>`: hold back only what the tag could need.
             const maxPartial = '</thinking>'.length - 1
             if (tagBuffer.length > maxPartial) {
               const safe = tagBuffer.substring(0, tagBuffer.length - maxPartial)
@@ -127,10 +112,9 @@ export async function parseAgentCoreStream(
   let completed = false
 
   /**
-   * Signals the end of the stream, exactly once. A finished turn arrives as *both* a
-   * `modelMessageStopEvent` with `endTurn` and an `agentResultEvent`, and the final flush signals it
-   * again if neither showed up. Consumers act on completion — settling the bubble, and whatever a
-   * given screen hangs off the end of a turn — so letting it through twice does that work twice.
+   * Fires exactly once. A finished turn arrives as *both* a `modelMessageStopEvent` with `endTurn`
+   * and an `agentResultEvent`, plus the final flush if neither showed up — and consumers hang
+   * end-of-turn work off this, so letting it through twice does that work twice.
    */
   const complete = () => {
     if (completed) return
@@ -179,7 +163,6 @@ export async function parseAgentCoreStream(
             if (delta?.type === 'textDelta' && delta.text != null) {
               thinkingFilter.push(delta.text)
             }
-            // Extended thinking (real reasoning content, e.g. Claude)
             if (delta?.type === 'reasoningContentDelta' && delta.text) {
               callbacks.onThinking(delta.text)
             }

@@ -2,10 +2,9 @@ import * as strands from '@strands-agents/sdk'
 import { createTools } from './tools'
 
 /**
- * Shared across requests on purpose: `BedrockModel`'s constructor builds a `BedrockRuntimeClient`,
- * so a per-request model would mean a per-request connection pool and a TLS handshake on the
- * critical path of every call. The client itself is stateless between invocations — unlike the
- * `Agent` built around it below, which is why that part is not shared.
+ * Shared on purpose: the constructor builds a `BedrockRuntimeClient`, so a per-request model means a
+ * per-request connection pool and a TLS handshake on every call. It is stateless between
+ * invocations — unlike the `Agent` below, which is why that part is not shared.
  */
 const bedrockModel = new strands.BedrockModel({
   region: process.env.AWS_REGION || 'us-east-1',
@@ -16,12 +15,9 @@ const bedrockModel = new strands.BedrockModel({
 const tools = createTools()
 
 /**
- * The agent's instructions.
- *
- * Kept short on purpose. This is a template: a long prompt tuned to one product is the first thing
- * a new project has to unpick, and every extra rule here is one more thing competing for the
- * model's attention with the rules that actually matter to *your* domain. Replace the "What you can
- * do" section as you add tools, and leave the rest.
+ * The agent's instructions, kept short on purpose: a long prompt tuned to one product is the first
+ * thing a new project has to unpick, and every extra rule competes for the model's attention with
+ * the ones that matter to *your* domain. Replace "What you can do" as you add tools.
  */
 const systemPrompt = `
 You are a helpful personal assistant. You answer questions, think things through with the user, and
@@ -54,16 +50,12 @@ claim about who someone is from the conversation.
 `.trim()
 
 /**
- * Builds a fresh agent for one request — never a shared one.
+ * A fresh agent per request — never a shared one. A Strands `Agent` keeps its own `messages` array,
+ * so one reused across requests on a warm container accumulates state *across callers*: one user's
+ * conversation leaks into the next, and concurrent invocations interleave their appends.
  *
- * A Strands `Agent` retains its own `messages` array across turns. A module-level agent reused
- * across requests in a warm container therefore accumulates conversation state *across callers*,
- * which is wrong in two ways: one user's conversation can leak into the next user's prompt, and two
- * concurrent invocations landing on the same warm container interleave their appends into one array.
- *
- * `messages` seeds the agent with this session's prior turns so the model has conversation context.
- * The agent object itself is cheap to allocate — a prompt, a tool list and an optional history —
- * the expensive part, the Bedrock client, is the module-level `bedrockModel` shared above.
+ * Cheap to allocate — a prompt, a tool list and `messages`, this session's prior turns. The
+ * expensive part is the module-level `bedrockModel` above.
  */
 export function createAgent(messages?: strands.Agent['messages']): strands.Agent {
   return new strands.Agent({

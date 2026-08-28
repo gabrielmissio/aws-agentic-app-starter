@@ -3,15 +3,10 @@ import { parseAgentCoreStream, type StreamCallbacks } from './stream-parser'
 import { readAppConfig } from './app-config'
 
 /**
- * The chat transport. There is exactly one: the browser posts to the BFF, which invokes the
- * AgentCore runtime over SigV4 and re-streams the result.
- *
- * The browser has no path to the runtime at all, and that is a security property rather than a
- * layering preference. The agent learns who is asking from an identity block the BFF prepends to the
- * prompt, built from claims the API Gateway Cognito authorizer already verified. Were the browser to
- * speak to AgentCore directly, that block would be the opening lines of a request body it composed —
- * so anyone able to type into the chat box could name any `userId` and have the agent's tools act
- * for them. See `infra/src/stacks/agent-stack.ts` for the deployment-side half.
+ * The chat transport, and there is exactly one: the browser posts to the BFF, which invokes the
+ * runtime over SigV4 and re-streams the result. That the browser has no path to the runtime is a
+ * security property — a direct one would make the agent's identity block a request body the browser
+ * composed. See `infra/src/stacks/agent-stack.ts` for the deployment-side half.
  */
 
 const BFF_URL = readAppConfig('VITE_API_URL') ?? '/api'
@@ -64,17 +59,13 @@ export async function sendMessageBff(
     throw new Error('No response body from BFF')
   }
 
-  // The BFF sends its own SSE envelope. Each "chunk" event's content
-  // contains raw AgentCore SSE data. We pipe those chunks into the
-  // existing AgentCore stream parser.
+  // Unwraps the BFF's SSE envelope and forwards each chunk's inner AgentCore SSE to the parser.
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   const encoder = new TextEncoder()
   let buffer = ''
   let eventType = ''
 
-  // Push-based ReadableStream: reads the BFF SSE stream and forwards
-  // only the inner AgentCore SSE content to the consumer.
   const agentCoreStream = new ReadableStream<Uint8Array>({
     start(controller) {
       ;(async () => {
@@ -115,7 +106,6 @@ export async function sendMessageBff(
     },
   })
 
-  // Parse the forwarded AgentCore events using the existing parser
   const fakeResponse = new Response(agentCoreStream)
   await parseAgentCoreStream(fakeResponse, callbacks)
 }

@@ -1,23 +1,15 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 
 /**
- * The authenticated caller for the request currently being served.
- *
- * Tools read the user from here, never from a tool parameter: an identity the model can pass is one
- * it can be talked into changing, and "look up the notes for user X" does nothing if no tool accepts
- * a user id. The BFF builds the block from claims the API Gateway Cognito authorizer verified; it
- * arrives atop the prompt and is parsed off here.
+ * The authenticated caller for the request being served — the extension point a tool uses instead of
+ * taking a user id, since an identity the model can pass is one it can be talked into changing.
  *
  * What makes that safe is the transport, not this parser. The block is plain text, so it is only as
  * trustworthy as whoever could write it — and the runtime accepts SigV4 alone, with only the BFF's
- * role granted `InvokeAgentRuntime` (`infra/src/stacks/agent-stack.ts`). Any browser-speakable
- * transport would make the block a request body any signed-in user could compose.
+ * role granted `InvokeAgentRuntime` (`infra/src/stacks/agent-stack.ts`).
  *
  * `AsyncLocalStorage`, not a module-level variable: a warm container serves concurrent invocations,
  * and a shared variable would leak one caller's identity into another's tool call.
- *
- * **This is the extension point.** A tool that has to act for a person calls `currentCaller()` and
- * takes no user id in its input schema — see the note on `createTools` in `tools.ts`.
  */
 export interface Caller {
   userId: string

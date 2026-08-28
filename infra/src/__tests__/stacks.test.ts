@@ -58,10 +58,9 @@ function synthAuth(props: Partial<ConstructorParameters<typeof AuthStack>[2]> = 
 }
 
 describe('AuthStack — the browser gets a token and nothing else', () => {
-  // An Identity Pool vends AWS credentials to a signed-in browser. One whose authenticated role
-  // carried `bedrock-agentcore:InvokeAgentRuntime` would let any signed-in user reach the runtime
-  // directly and hand it an identity block naming *another* user. These assert absence because
-  // adding a pool back is a natural thing to do by habit.
+  // An Identity Pool vends AWS credentials to a signed-in browser, and one whose role carried
+  // `InvokeAgentRuntime` would let any user reach the runtime and name *another* in the identity
+  // block. Absence is asserted because adding a pool back is a natural thing to do by habit.
   it('creates no Cognito Identity Pool', () => {
     const { template } = synthAuth()
 
@@ -384,9 +383,8 @@ describe('BffStack — every route is authenticated, and the chat role stays nar
     const { template } = synthBff()
 
     // Both handlers fail closed without verified claims, which only holds if no route reaches one
-    // unauthenticated — so a route added without an authorizer fails here, not in production.
-    // Asserted over *every* method rather than a known list, so a new route is covered the day it
-    // is added. `OPTIONS` is exempt: CORS preflight carries no Authorization header by definition.
+    // unauthenticated. Asserted over *every* method rather than a known list, so a new route is
+    // covered the day it is added. `OPTIONS` is exempt: a preflight carries no Authorization header.
     const methods = Object.values(template.findResources('AWS::ApiGateway::Method')).filter(
       (m) => m.Properties.HttpMethod !== 'OPTIONS',
     )
@@ -519,10 +517,9 @@ describe('the pilot posture is in the template, not only in the README', () => {
     expect(props.MfaConfiguration).toBeUndefined()
     expect(props.SmsConfiguration).toBeUndefined()
 
-    // The one that is not merely a default. Cognito cannot add a standard attribute to a live pool:
-    // CloudFormation tries `AddCustomAttributes`, which takes custom attributes only and wants a
-    // data type the CDK does not render for standard ones, and the deploy fails with "Invalid
-    // AttributeDataType input". A schema that grows by default breaks every existing deployment.
+    // Not merely a default: Cognito cannot add a standard attribute to a live pool — CloudFormation
+    // tries `AddCustomAttributes` and the deploy fails with "Invalid AttributeDataType input". A
+    // schema that grows by default breaks every existing deployment.
     const names = (props.Schema as { Name: string }[]).map((a) => a.Name)
     expect(names).not.toContain('phone_number')
     expect(names).toEqual(['email', 'inviteLocale'])

@@ -24,13 +24,7 @@ export const LOCALE_LABELS: Record<Locale, string> = {
   'pt-BR': 'Português',
 }
 
-/**
- * The same choice, two characters wide.
- *
- * The header switcher sits next to the product name on a phone, where "Português" would push the
- * title off the screen. Full names stay wherever there is room for them — the admin panel's invite
- * form, for one.
- */
+/** The same choice, two characters wide — the header switcher has no room for "Português". */
 export const LOCALE_SHORT_LABELS: Record<Locale, string> = {
   'en-US': 'EN',
   'pt-BR': 'PT',
@@ -50,9 +44,8 @@ export interface I18nValue {
 export const I18nContext = createContext<I18nValue | undefined>(undefined)
 
 /**
- * Picks the startup locale: an explicit past choice wins, otherwise the browser's preference order,
- * otherwise English. Reading `localStorage` is wrapped because it throws outright in a few privacy
- * modes, and a locale preference is never worth failing to render over.
+ * An explicit past choice, then the browser's preference order, then English. The `localStorage`
+ * read is wrapped because it throws outright in some privacy modes.
  */
 export function detectLocale(): Locale {
   let stored: string | null

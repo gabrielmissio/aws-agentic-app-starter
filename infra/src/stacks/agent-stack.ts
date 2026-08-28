@@ -25,19 +25,14 @@ function compactEnvironment(environment: Record<string, string | undefined>): Re
 /**
  * The agent container and its Bedrock AgentCore runtime.
  *
- * The runtime carries **no authorizer configuration**, which is what makes it SigV4-only: the sole
- * caller is the BFF's chat function, holding `bedrock-agentcore:InvokeAgentRuntime` on this one ARN
- * (see `BffStack`). No browser can reach it.
+ * The runtime carries **no authorizer configuration**, which makes it SigV4-only: the BFF's chat
+ * function is the sole holder of `InvokeAgentRuntime` on this ARN, so no browser can reach it.
  *
- * That is a security boundary, not a deployment preference. The agent learns who is asking from an
- * identity block the BFF prepends to the prompt, built from claims the API Gateway Cognito
- * authorizer already verified. A block is only as trustworthy as the transport that carried it — so
- * the transport has to be one nothing but the BFF can speak.
- *
- * Adding a Cognito JWT authorizer here would let the browser call the runtime directly, which makes
- * the identity block client-supplied text: any signed-in user could name another user's `sub` and
- * have the agent's tools act for them. Do not add one unless the block becomes a signed token the
- * runtime itself verifies.
+ * That is a security boundary. The agent learns who is asking from a plain-text identity block the
+ * BFF prepends to the prompt, which is only as trustworthy as the transport that carried it. A
+ * Cognito JWT authorizer here would let the browser call the runtime directly, making that block
+ * client-supplied text — any signed-in user could name another user's `sub`. Do not add one unless
+ * the block becomes a signed token the runtime itself verifies.
  */
 export class AgentStack extends cdk.Stack {
   public readonly runtimeArn: string
@@ -64,9 +59,8 @@ export class AgentStack extends cdk.Stack {
           sid: 'EcrImageAccess',
           effect: iam.Effect.ALLOW,
           actions: ['ecr:BatchGetImage', 'ecr:GetDownloadUrlForLayer'],
-          // The asset's own repository. A wildcard here let a compromised container read every
-          // image in the account — a fast way to enumerate what else the organization builds, and
-          // to pull layers that were never meant to be readable from this workload.
+          // The asset's own repository. A wildcard would let a compromised container enumerate and
+          // pull every other image in the account.
           resources: [imageAsset.repository.repositoryArn],
         }),
         new iam.PolicyStatement({
@@ -92,8 +86,7 @@ export class AgentStack extends cdk.Stack {
           sid: 'DescribeLogGroups',
           effect: iam.Effect.ALLOW,
           actions: ['logs:DescribeLogGroups'],
-          // Its own log groups. Account-wide `DescribeLogGroups` is a listing of every workload in
-          // the account, which is reconnaissance handed to whatever runs in the container.
+          // Its own log groups: account-wide `DescribeLogGroups` lists every workload in the account.
           resources: [
             cdk.Stack.of(this).formatArn({
               service: 'logs',
@@ -142,16 +135,9 @@ export class AgentStack extends cdk.Stack {
           sid: 'BedrockModelAccess',
           effect: iam.Effect.ALLOW,
           actions: ['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream'],
-          // The model this agent is configured to use, and nothing else.
-          //
-          // `foundation-model/*` in every region, plus `bedrock:*` in this account, is a budget with
-          // no ceiling and a data path with no boundary: a compromised container could invoke any
-          // model in any region — including regions the deployment was never reviewed for, which is
-          // a data-residency problem as much as a cost one.
-          //
-          // A cross-region inference profile fans out to the foundation model in each of its member
-          // regions, so both ARN shapes are needed: the profile the caller names, and the model the
-          // profile resolves to. The foundation-model ARN is account-less by AWS's own convention.
+          // This model and nothing else. A wildcard is a budget with no ceiling and a data path
+          // with no boundary — any model in any region, including ones never reviewed for this
+          // deployment, which is a data-residency problem as much as a cost one.
           resources: bedrockModelResources(this, modelId),
         }),
       ],
@@ -178,10 +164,9 @@ export class AgentStack extends cdk.Stack {
       },
     })
 
-    // A tool that reaches a backend signs its own request with this role's credentials, so the
-    // grant goes here — e.g. `someLambda.grantInvoke(runtimeRole)` or a Function URL's
-    // `grantInvokeUrl(runtimeRole)`. Keeping the grant on the *runtime* role rather than on a
-    // shared one is what bounds what a compromised container can reach.
+    // A tool that reaches a backend signs with this role's credentials, so its grant goes here —
+    // `someLambda.grantInvoke(runtimeRole)`, or `grantInvokeUrl`. Keeping it on the runtime role is
+    // what bounds what a compromised container can reach.
 
     const runtime = new bedrockagentcore.CfnRuntime(this, 'AgentRuntime', {
       agentRuntimeName: projectName.replaceAll('-', '_'),
@@ -199,21 +184,17 @@ export class AgentStack extends cdk.Stack {
       environmentVariables: compactEnvironment({
         AWS_REGION: this.region,
         PORT: '8080',
-        // Explicit, so the container runs the model its role is scoped to rather than falling back
-        // to its own default and being denied by IAM.
+        // Explicit, so the container cannot fall back to a default its role would deny.
         BEDROCK_MODEL_ID: modelId,
         // Anything a tool needs to find its backend goes here — a Function URL, a table name. The
-        // agent should register such a tool only when its configuration is present, so an
-        // unconfigured deployment offers no tool rather than one that fails on every call.
+        // agent should register such a tool only when its configuration is present.
         ...runtimeEnvironment,
       }),
       lifecycleConfiguration: {
         idleRuntimeSessionTimeout: 900,
         maxLifetime: 14400,
       },
-      // No `authorizerConfiguration`, deliberately — see the note on the class above: without one
-      // the runtime accepts SigV4 only, so the BFF's execution role is its single caller and a
-      // browser has no path to it at all.
+      // No `authorizerConfiguration`, deliberately — see the note on the class above.
       tags: {
         Project: projectName,
       },
@@ -253,15 +234,10 @@ export class AgentStack extends cdk.Stack {
 }
 
 /**
- * The ARNs that invoking one Bedrock model actually requires.
- *
- * Two shapes, because a cross-region inference profile is not the model. Naming a profile
- * (`global.…`, `us.…`) invokes it, and the profile in turn invokes the foundation model in whichever
- * member region it routes to — so a policy listing only one of the two denies every call.
- *
- * The region stays wildcarded for exactly that reason: the routing decides it, and a cross-region
- * profile that could only reach one region is not one. What is pinned is the part that matters —
- * *which model*, rather than every model Bedrock offers.
+ * The ARNs invoking one Bedrock model actually requires — two shapes, because a cross-region
+ * inference profile is not the model. Naming a profile invokes it, and the profile invokes the
+ * foundation model in whichever member region it routes to, so listing only one denies every call.
+ * The region stays wildcarded because the routing decides it; what is pinned is *which model*.
  */
 export function bedrockModelResources(
   scope: { partition: string; account: string },

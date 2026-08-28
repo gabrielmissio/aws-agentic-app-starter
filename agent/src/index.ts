@@ -6,12 +6,10 @@ import { parsePrompt, withCaller } from './caller'
 const app = express()
 const PORT = process.env.PORT || 8080
 
-// In-memory conversation store keyed by AgentCore runtime session ID.
-// Sessions idle for more than 30 minutes are evicted on the next request.
+// Conversation history, keyed by AgentCore session id, evicted after 30 idle minutes.
 //
-// NOTE: this store is local to the container process. History is lost on restart and is not
-// shared across replicas. For a multi-instance or durable deployment, replace this with the
-// Strands SDK SessionManager backed by a persistent store (e.g. DynamoDB).
+// Local to the container process: lost on restart, not shared across replicas. A durable deployment
+// replaces this with the Strands SDK's SessionManager over a persistent store.
 const SESSION_TTL_MS = 30 * 60 * 1000
 type ConversationHistory = ReturnType<typeof createAgent>['messages']
 const conversationStore = new Map<string, { history: ConversationHistory; lastAccess: number }>()
@@ -23,7 +21,7 @@ function evictStaleSessions(): void {
   }
 }
 
-// Health check endpoint (REQUIRED)
+// Required by AgentCore.
 app.get('/ping', (_: Request, res: Response) =>
   res.json({
     status: 'Healthy',
@@ -31,8 +29,7 @@ app.get('/ping', (_: Request, res: Response) =>
   })
 )
 
-// Agent invocation endpoint (REQUIRED)
-// AWS sends binary payload, so we use express.raw middleware
+// Required by AgentCore. The payload arrives binary, hence `express.raw`.
 app.post(
   '/invocations',
   express.raw({ type: '*/*', limit: MAX_BODY_BYTES }),
@@ -44,14 +41,11 @@ app.post(
         return res.status(413).json({ error: `Body exceeds ${MAX_BODY_LENGTH} characters` })
       }
 
-      // The BFF prepends a block naming the caller it authenticated. Splitting it off here means the
-      // identity is bound to the request's async context, where tools read it directly — so no tool
-      // has to take a user id as a parameter, and no prompt can talk the agent into using another
-      // one. A request with no block simply carries no caller; see caller.ts.
+      // Splitting the BFF's identity block off here binds the caller to the request's async
+      // context, where tools read it — so no tool needs a user id parameter. See caller.ts.
       const { caller, message: prompt } = parsePrompt(raw)
 
-      // AgentCore forwards the runtime session id as a header; use it to look up this
-      // conversation's message history so the agent has context from prior turns.
+      // AgentCore forwards the session id as a header; it keys this conversation's history.
       const sessionId = req.headers['x-amzn-bedrock-agentcore-runtime-session-id'] as string | undefined
       evictStaleSessions()
       const prior = sessionId ? conversationStore.get(sessionId)?.history : undefined
@@ -61,12 +55,9 @@ app.post(
       res.setHeader('Connection', 'keep-alive')
       res.flushHeaders()
 
-      // The WHOLE stream is consumed inside the caller scope, not just created inside it. An async
-      // generator's body does not inherit the context its creation call ran in — only the context
-      // active while it is being iterated — so binding at creation would leave every tool callback
-      // seeing no caller at all. `caller.test.ts` pins this down.
-      //
-      // A fresh agent per request — see the comment on createAgent() for why one must not be shared.
+      // The WHOLE stream is consumed inside the scope, not merely created inside it: a generator's
+      // body inherits the context active while it is *iterated*, so binding at creation would leave
+      // every tool callback seeing no caller. `__tests__/caller.test.ts` pins this down.
       await withCaller(caller, async () => {
         const agent = createAgent(prior)
         for await (const event of agent.stream(prompt)) {
@@ -90,9 +81,8 @@ app.post(
   },
 )
 
-// express.raw() rejects an oversized body itself, before the route handler above ever runs, by
-// calling next(err) — without this, Express's default error handler would turn that into an HTML
-// error page, not the JSON this endpoint's callers expect.
+// `express.raw()` rejects an oversized body before the route runs. Without this, Express's default
+// handler would answer with an HTML error page rather than the JSON callers expect.
 app.use((err: (Error & { status?: number; type?: string }) | null, _req: Request, res: Response, next: NextFunction) => {
   if (!err) return next()
 

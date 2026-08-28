@@ -21,24 +21,15 @@ export interface BffStackProps extends cdk.StackProps {
   agentRuntimeArn: string
   /** Caps requests/second on the API stage. Every request that gets through costs Bedrock tokens. */
   throttle: ApiThrottle
-  /**
-   * Browser origin allowed to call this API — both on the CORS preflight and on every response
-   * header the Lambdas set. Defaults to `*` (see `resolveAllowedOrigin` in `config.ts` for why).
-   */
+  /** Browser origin allowed to call this API, on the preflight and on every response header. */
   allowedOrigin?: string
-  /**
-   * Caps how often one signed-in caller can hit `/chat`, independent of `throttle` above (which
-   * caps the whole account). Defaults to `DEFAULT_USER_RATE_LIMIT`.
-   */
+  /** Caps one signed-in caller on `/chat`, independent of `throttle`, which caps the account. */
   userRateLimit?: UserRateLimit
   /** Subscribed to alarms and to the budget. The alarms exist either way. */
   alertEmail?: string
   /** Monthly USD ceiling that triggers a budget notification. Omitted disables the budget. */
   monthlyBudgetUsd?: number
-  /**
-   * Whether a WAF web ACL fronts the API stage. Opt-in via `WAF_ENABLED` in every profile — see
-   * `resolveWafEnabled` for why it is a recommendation rather than a gate.
-   */
+  /** Whether a WAF web ACL fronts the API stage. Opt-in in every profile. */
   wafEnabled?: boolean
 }
 
@@ -119,8 +110,8 @@ export class BffStack extends cdk.Stack {
     )
 
     // ── API Gateway REST API ───────────────────────────────────────────
-    // Access logs cover reach; the admin function's own audit lines cover intent. `dataTraceEnabled`
-    // stays off: it writes request and response bodies to CloudWatch, leaking whole conversations.
+    // `dataTraceEnabled` stays off: it writes request and response bodies to CloudWatch, which
+    // would put whole conversations in the log group.
     const accessLogGroup = new logs.LogGroup(this, 'ApiAccessLogs', {
       logGroupName: `/aws/apigateway/${projectName}-chat-api`,
       retention: logs.RetentionDays.ONE_MONTH,
@@ -132,8 +123,7 @@ export class BffStack extends cdk.Stack {
       deployOptions: {
         stageName: 'prod',
         loggingLevel: apigateway.MethodLoggingLevel.ERROR,
-        // Without this the stage inherits the account default (10k rps), which is not a limit so
-        // much as an invitation — every request that gets through costs Bedrock tokens.
+        // Without this the stage inherits the account's 10k rps, and every request costs tokens.
         throttlingRateLimit: throttle.rateLimit,
         throttlingBurstLimit: throttle.burstLimit,
         accessLogDestination: new apigateway.LogGroupLogDestination(accessLogGroup),
@@ -152,9 +142,8 @@ export class BffStack extends cdk.Stack {
         ),
       },
       defaultCorsPreflightOptions: {
-        // Mirrors ALLOWED_ORIGIN on the Lambdas above — a specific origin here without a matching
-        // env var (or vice versa) would pass preflight but fail on the actual response, or the
-        // reverse. Both read from the same `allowedOrigin` prop so they can't drift.
+        // Both this and the Lambdas' ALLOWED_ORIGIN read the same prop, so they cannot drift into
+        // a preflight that passes and a response that fails, or the reverse.
         allowOrigins: allowedOrigin === '*' ? apigateway.Cors.ALL_ORIGINS : [allowedOrigin],
         // GET is here for the admin user listing; the chat route is POST only.
         allowMethods: ['GET', 'POST', 'OPTIONS'],
@@ -166,14 +155,14 @@ export class BffStack extends cdk.Stack {
     /**
      * Declaring no `authorizationScopes` is what makes this an **ID token** authorizer: without
      * scopes API Gateway reads the credential as an identity token and rejects an access token
-     * outright ([docs](https://docs.aws.amazon.com/apigateway/latest/developerguide/apigateway-enable-cognito-user-pool.html)).
+     * ([docs](https://docs.aws.amazon.com/apigateway/latest/developerguide/apigateway-enable-cognito-user-pool.html)).
      * The frontend sends the ID token for that reason.
      *
-     * Accepting the OAuth-correct access token instead would need a resource server with a custom
-     * scope on every method, and SRP sign-in only ever issues `aws.cognito.signin.user.admin` — so
-     * the scope would come from a pre-token-generation trigger, making every API call depend on a
-     * Lambda succeeding. The replay exposure that OAuth rule guards against does not arise here
-     * anyway: one pool, one client, one consumer. Use a Lambda authorizer if that stops being true.
+     * Accepting the OAuth-correct access token would need a resource server with a custom scope on
+     * every method, and SRP sign-in only issues `aws.cognito.signin.user.admin` — so the scope would
+     * come from a pre-token-generation trigger, putting a Lambda on every API call. The replay
+     * exposure that OAuth rule guards against does not arise here: one pool, one client, one
+     * consumer. Use a Lambda authorizer if that stops being true.
      */
     const authorizer = new apigateway.CognitoUserPoolsAuthorizer(this, 'CognitoAuthorizer', {
       cognitoUserPools: [userPool],
@@ -203,9 +192,8 @@ export class BffStack extends cdk.Stack {
 
     // ── Admin function ─────────────────────────────────────────────────
     // A second function, not more routes on the chat one: this role carries
-    // `cognito-idp:AdminCreate*`, and the function relaying model output must not. Keeping a
-    // privileged grant off the role that handles model output is the shape to copy when this
-    // template grows a route that can do something consequential.
+    // `cognito-idp:AdminCreate*`, and the function relaying model output must not. That is the
+    // shape to copy when this template grows a route that can do something consequential.
     const adminFn = new lambda.Function(this, 'AdminFunction', {
       functionName: `${projectName}-bff-admin`,
       code: lambda.Code.fromAsset('../chatbot-bff', {
@@ -213,9 +201,8 @@ export class BffStack extends cdk.Stack {
       }),
       handler: 'dist/admin-handler.handler',
       runtime: lambda.Runtime.NODEJS_22_X,
-      // API Gateway's REST integration ceiling is a hard 29s for a buffered response, so a longer
-      // Lambda timeout only keeps billing after the gateway has returned 504. The chat function
-      // stays at 60s because it streams, which is not held to the buffered cap.
+      // The REST integration ceiling is a hard 29s for a buffered response; longer only keeps
+      // billing after the gateway has returned 504. The chat function streams, so it is exempt.
       timeout: cdk.Duration.seconds(29),
       memorySize: 256,
       architecture: lambda.Architecture.X86_64,
@@ -247,9 +234,8 @@ export class BffStack extends cdk.Stack {
     )
 
     // ── /admin/users ───────────────────────────────────────────────────
-    // Same Cognito authorizer as /chat, so the gateway still validates the token's signature,
-    // expiry and issuer. Membership in the admin group is enforced inside the function, which is
-    // safe to centralize there because this function serves admin routes and nothing else.
+    // Same authorizer as /chat, so the gateway still validates the token. Group membership is
+    // enforced inside the function, safe to centralize because it serves admin routes and nothing else.
     const adminIntegration = new apigateway.LambdaIntegration(adminFn, { proxy: true })
     const adminUsers = api.root.addResource('admin').addResource('users')
 
@@ -262,6 +248,7 @@ export class BffStack extends cdk.Stack {
 
     // ── Operations: alarms and a spend ceiling ──────────────────────────
     // Without these you learn the deployment is broken, or expensive, from a user or an invoice.
+
     const alarmTopic = new sns.Topic(this, 'AlarmTopic', {
       topicName: `${projectName}-alarms`,
       displayName: `${projectName} alarms`,
@@ -302,8 +289,7 @@ export class BffStack extends cdk.Stack {
       alarm.addAlarmAction(new cwactions.SnsAction(alarmTopic))
     }
 
-    // A budget alerts; it cannot stop spend. It exists so a runaway loop is noticed in hours rather
-    // than on the invoice. Account-wide by nature, so it needs an address to notify.
+    // A budget alerts; it cannot stop spend. Account-wide by nature, so it needs an address.
     if (monthlyBudgetUsd && alertEmail) {
       new budgets.CfnBudget(this, 'MonthlyBudget', {
         budget: {
@@ -324,7 +310,6 @@ export class BffStack extends cdk.Stack {
       })
     }
 
-    // ── WAF ────────────────────────────────────────────────────────────
     if (wafEnabled) attachWebAcl(this, projectName, api)
 
     this.apiUrl = api.url
@@ -338,16 +323,11 @@ export class BffStack extends cdk.Stack {
 }
 
 /**
- * A regional web ACL on the API stage.
+ * A regional web ACL on the API stage — the only layer that filters *before* authentication. The
+ * stage throttle says nothing about who is spending it, and the per-caller quota is keyed on an
+ * authenticated `sub`, so an unauthenticated flood or a scripted sign-up run never reaches either.
  *
- * This is the layer the existing controls do not cover. The stage throttle bounds the whole account
- * and says nothing about who is spending it; the per-caller quota is keyed on an authenticated
- * `sub`, so it only engages *after* a request has been authenticated — and an unauthenticated flood,
- * a scripted sign-up run, or an L7 payload never gets that far. CORS is not a control at all: it
- * asks the browser to cooperate.
- *
- * Three managed groups and one rate rule, all in `count` for nothing — every rule blocks. A managed
- * rule group in count mode is a dashboard, and a pilot that needs a dashboard needs a decision.
+ * Every rule blocks; none is in `count` mode. A managed rule group in count mode is a dashboard.
  */
 function attachWebAcl(scope: Construct, projectName: string, api: apigateway.RestApi): void {
   const managed = (name: string, priority: number): wafv2.CfnWebACL.RuleProperty => ({
@@ -382,12 +362,9 @@ function attachWebAcl(scope: Construct, projectName: string, api: apigateway.Res
       managed('AWSManagedRulesCommonRuleSet', 30),
       {
         /**
-         * The ceiling a per-caller quota cannot express: requests from one IP, counted before
-         * anyone is authenticated. It is what bounds automated sign-up and unauthenticated probing,
-         * both of which cost money here — one through Cognito, the other through the stage.
-         *
-         * Deliberately loose. A shared NAT puts a whole office behind one address, and the tighter
-         * per-`sub` quotas are still underneath; this catches a script, not a busy user.
+         * Requests from one IP, counted before anyone is authenticated — what bounds automated
+         * sign-up and unauthenticated probing. Deliberately loose: a shared NAT puts a whole office
+         * behind one address, and the per-`sub` quotas are still underneath.
          */
         name: 'RateLimitPerIp',
         priority: 40,
@@ -408,7 +385,6 @@ function attachWebAcl(scope: Construct, projectName: string, api: apigateway.Res
     resourceArn: api.deploymentStage.stageArn,
     webAclArn: acl.attrArn,
   })
-  // The stage must exist before anything can be associated with it; CloudFormation does not infer
-  // that from `stageArn` alone, which is a token it can resolve either way.
+  // CloudFormation cannot infer the ordering from `stageArn`, which is a token either way.
   association.node.addDependency(api.deploymentStage)
 }

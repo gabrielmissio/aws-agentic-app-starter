@@ -1,33 +1,20 @@
 /**
- * Cognito CustomMessage trigger — replaces the plain-text invite and sign-up-confirmation emails
- * with the designed HTML in `email-template.mjs`, and adds a link to the app when its URL is known.
+ * Cognito CustomMessage trigger — the plumbing that picks a message type, resolves the app URL and
+ * decides what happens when something breaks. The copy and HTML live in `email-template.mjs`.
  *
- * This file is the plumbing — which message type, where the app URL comes from, what happens when
- * something breaks. The copy and the HTML live in `email-template.mjs`.
+ * It sits on the critical path of `AdminCreateUser` and `SignUp`: if it throws, the operation fails
+ * with it. So it keeps two properties — it returns unknown trigger sources untouched, leaving
+ * forgot-password and MFA on the pool's own templates, and it wraps everything, falling through to
+ * the unchanged event so the plain-text fallback goes out rather than the operation failing.
  *
- * Two properties this file must keep, because it sits on the critical path of both `AdminCreateUser`
- * and `SignUp` — if this function throws, the operation that triggered the email fails with it:
- *
- *   1. It handles only the trigger sources it knows about and returns every other one untouched, so
- *      forgot-password and MFA messages keep using the pool's own configured templates.
- *   2. Everything is wrapped: any unexpected shape or bug falls through to the event unchanged,
- *      which means the pool's plain-text fallback template goes out instead of the operation failing.
- *
- * Plain `.mjs` with no third-party imports on purpose — it needs no bundler, no dependencies and no
- * build step, so it cannot drift from what is deployed. `@aws-sdk/client-ssm` is imported lazily from
- * the Lambda Node.js 22 runtime's bundled AWS SDK v3, not from a dependency this asset ships.
+ * Plain `.mjs` with no third-party imports, so it needs no build step and cannot drift from what is
+ * deployed. `@aws-sdk/client-ssm` is imported lazily from the runtime's own bundled SDK.
  */
 import { buildInviteMessage, buildVerificationMessage } from './email-template.mjs'
 
 /**
- * Where the recipient's preferred language lives.
- *
- * Must match `LOCALE_ATTRIBUTE` in `chatbot-bff/src/admin.ts` — a *custom* attribute because
- * Cognito only lets standard attributes be declared when the pool is created, so a pool that
- * already has users can never gain one. Not named `locale`: that collides with a reserved standard
- * attribute, and the resulting schema entry is indistinguishable from declaring the standard one —
- * so `custom:locale` is never actually created and the attribute write fails. See the note in
- * `auth-stack.ts`.
+ * Where the recipient's language lives. Must match `LOCALE_ATTRIBUTE` in `chatbot-bff/src/admin.ts`.
+ * See the note in `auth-stack.ts` for why it is custom and why it is not named `locale`.
  */
 const LOCALE_ATTRIBUTE = 'custom:inviteLocale'
 
@@ -38,9 +25,9 @@ function readLocale(userAttributes) {
 }
 
 /**
- * Cached across warm invocations so a busy pool does not re-read SSM per email. Only a resolved,
- * non-empty URL is cached: a miss before the frontend stack has deployed must not be remembered, or
- * the container would keep sending link-less emails long after the parameter exists.
+ * Cached across warm invocations so a busy pool does not re-read SSM per email — but only a
+ * resolved URL: caching a miss would keep a container sending link-less emails long after the
+ * parameter exists.
  */
 let cachedAppUrl = ''
 
@@ -58,11 +45,8 @@ async function getSsmParameter(name) {
 }
 
 /**
- * Resolves where the app lives: an explicitly configured `APP_URL` wins, otherwise the URL the
- * frontend stack published to SSM.
- *
- * SSM is what breaks the dependency cycle — the frontend stack consumes the user pool this trigger
- * belongs to, so the auth stack can never receive the CloudFront URL as a synth-time reference.
+ * `APP_URL` wins, otherwise the URL the frontend stack published to SSM — which is what breaks the
+ * cycle, since that stack consumes the pool this trigger belongs to.
  */
 export async function resolveAppUrl({ env = process.env, getParameter = getSsmParameter } = {}) {
   const explicit = env.APP_URL?.trim()
@@ -78,8 +62,8 @@ export async function resolveAppUrl({ env = process.env, getParameter = getSsmPa
     if (value) cachedAppUrl = value
     return value ?? ''
   } catch (err) {
-    // Expected before the frontend stack has deployed. The email still goes out, just without a
-    // link, which beats failing sign-up or user creation over a missing URL.
+    // Expected before the frontend stack has deployed: the email goes out without a link, which
+    // beats failing sign-up over a missing URL.
     console.error('Could not read the app URL from SSM; sending without a link:', err)
     return ''
   }

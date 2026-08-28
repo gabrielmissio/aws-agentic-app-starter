@@ -1,12 +1,9 @@
 import { defineConfig } from 'tsup'
 
 /**
- * One bundle per handler, each self-contained.
- *
- * `BffStack` ships this package with `node_modules` excluded, so anything left external has to be
- * something the managed Node runtime happens to provide. `noExternal` removes that bet entirely:
- * every import is bundled, so nothing resolves to nothing at cold start, and the SDK version that
- * runs is the one these handlers were tested against rather than whatever AWS ships this month.
+ * One self-contained bundle per handler. `BffStack` ships this package with `node_modules` excluded,
+ * so anything left external is a bet on what the managed runtime provides — one that fails at cold
+ * start, and that pins the SDK to whatever AWS ships rather than what was tested.
  */
 export default defineConfig({
   entry: ['src/handler.ts', 'src/admin-handler.ts'],

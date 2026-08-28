@@ -4,11 +4,9 @@ import { ToolBadgeList } from './ToolBadge.tsx'
 import { BrandAvatar } from './ui/index.ts'
 
 /**
- * Loaded on demand, with the plain text as the fallback.
- *
- * The Markdown renderer and its GFM plugin are the single largest thing this app would otherwise
- * ship on first paint. The lazy boundary means the chunk is fetched on the stream's first line
- * break — long before a long answer is finished — so the swap is seamless.
+ * Loaded on demand with the plain text as fallback: the Markdown renderer and its GFM plugin are the
+ * largest thing this app would otherwise ship on first paint. The chunk is fetched on the stream's
+ * first line break, so the swap is seamless.
  */
 const AgentMarkdown = lazy(() => import('./AgentMarkdown.tsx'))
 
@@ -28,13 +26,9 @@ function PlainText({ content, cursor }: { content: string; cursor?: boolean }) {
 }
 
 /**
- * Renders every complete line as markdown while the line still being written stays plain text.
- *
- * Line-by-line rather than paragraph-by-paragraph: a table only becomes a table once its rows are
- * there, and waiting for the blank line that ends it would leave the reader looking at a screenful
- * of raw pipes until the model moved on to the next paragraph. Splitting at the last line break
- * renders each row as it lands, and keeps a half-typed row out of the parser — where it would
- * render as a broken one and then reflow.
+ * Complete lines render as markdown; the line still being written stays plain text. Line-by-line
+ * rather than paragraph-by-paragraph, because waiting for the blank line that ends a table leaves
+ * the reader looking at raw pipes until the model moves on.
  */
 function StreamingMarkdown({ content }: { content: string }) {
   const { complete, tail } = useMemo(() => splitStreamingMarkdown(content), [content])

@@ -8,16 +8,13 @@ export const ADMIN_CORS_METHODS = 'GET, POST, OPTIONS'
 const CORS_HEADERS = 'Content-Type, Authorization'
 
 /**
- * Resolves `Access-Control-Allow-Origin` against the configured allowlist.
+ * `ALLOWED_ORIGIN` is a comma-separated allowlist, or the literal `*`. A listed origin is reflected
+ * back; anything else gets the first configured one, which the calling page is not, so the browser
+ * refuses the response.
  *
- * `ALLOWED_ORIGIN` is a comma-separated list, or the literal `*`. With `*` the wildcard is echoed
- * back. Otherwise the caller's origin is reflected **only if it is on the list**; anything else gets
- * the first configured origin, which is a value the calling page is not, so the browser refuses it.
- *
- * Reflecting whatever origin arrives would make this knob a no-op. That alone is not exploitable
- * here — `Access-Control-Allow-Credentials` is never sent and the API authenticates with a bearer
- * header rather than a cookie, so a foreign page cannot make the browser attach a victim's token —
- * but it becomes exploitable the moment anyone adds credentialed requests.
+ * Reflecting whatever arrives would make this a no-op. Not exploitable today — no
+ * `Access-Control-Allow-Credentials`, and a bearer header rather than a cookie — but it becomes so
+ * the moment anyone adds credentialed requests.
  */
 export function resolveOrigin(allowedOrigin: string, requestOrigin?: string): string {
   if (allowedOrigin === '*') return '*'
@@ -45,17 +42,10 @@ export function sseHeaders(allowedOrigin: string, requestOrigin?: string): Recor
 }
 
 /**
- * Headers for every JSON response this API returns.
- *
- * `no-store` and `nosniff` are not boilerplate here. Each of these responses is scoped to one
- * caller — the admin user listing today, whatever per-user data a route returns tomorrow — and the
- * routes are plain `GET`s that a browser, a proxy or a `bfcache` entry will happily keep.
- * `no-store` is the only directive that covers all three; `no-cache` still permits storage, and
- * the SSE path uses it for a different reason (keeping a stream from being buffered).
- *
- * `nosniff` matters because the bodies are attacker-influenceable — a user list carries names and
- * email addresses people chose — and a browser that content-sniffs a JSON body it decided looks
- * like HTML renders it.
+ * Headers for every JSON response. `no-store` rather than `no-cache`: these responses are scoped to
+ * one caller and returned from plain `GET`s, and only `no-store` forbids a browser, a proxy or a
+ * `bfcache` entry from keeping one. `nosniff` because the bodies carry user-chosen text, and a
+ * browser that content-sniffs a JSON body into HTML renders it.
  */
 export function jsonHeaders(
   allowedOrigin: string,
@@ -84,12 +74,8 @@ export function formatSseEvent(event: string, data: unknown): string {
 }
 
 /**
- * Ceiling on a single prompt, in characters.
- *
- * Rate limiting (see infra's `API_RATE_LIMIT`) caps how *often* the agent is called; this caps how
- * *much* each call costs. Without it, one authenticated client pasting a large document in a loop
- * runs up unbounded Bedrock spend with no other guardrail catching it. Generous enough for a long
- * question, small enough that abuse is bounded — raise it deliberately, not by accident.
+ * Ceiling on a single prompt. Rate limiting caps how *often* the agent is called; this caps how
+ * *much* each call costs. Raise it deliberately.
  */
 export const MAX_MESSAGE_LENGTH = 8000
 

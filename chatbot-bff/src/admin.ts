@@ -1,39 +1,28 @@
 /**
- * Pure logic for the admin routes — claim parsing, authorization, request validation, shaping.
- *
- * Split from `admin-handler.ts` so the rules that decide *who gets in* are covered by unit tests
- * instead of only being exercised against a deployed function. Nothing here talks to Cognito or to
- * Lambda's event shape.
+ * Pure logic for the admin routes — claim parsing, authorization, validation, shaping. Split from
+ * `admin-handler.ts` so the rules that decide *who gets in* are unit-testable; nothing here talks
+ * to Cognito or to Lambda's event shape.
  */
 import type { ErrorCode } from './errors.js'
 
 /**
- * Group whose members may call these routes. Read from the environment — set to `ADMIN_GROUP_NAME`
- * from `infra/src/stacks/auth-stack.ts` by the BFF stack — with the same literal as a fallback for
- * local dev, where nothing sets it. The two must be kept in sync by hand; they cannot import from
- * each other, since `infra` and `chatbot-bff` are independent packages with separate builds.
+ * Group whose members may call these routes, set from `ADMIN_GROUP_NAME` in the auth stack, with the
+ * same literal as a local-dev fallback. Kept in sync by hand: the two packages build separately.
  */
 export const ADMIN_GROUP = process.env.ADMIN_GROUP_NAME ?? 'admins'
 
 /**
- * Languages an invite email can be written in. Mirrors `SUPPORTED_LOCALES` in the frontend's i18n
- * core and the catalog in the CustomMessage trigger; the trigger falls back to the base locale, so
- * a value that slips past this list degrades to English rather than breaking the invite.
+ * Languages an invite email can be written in. Mirrors the frontend's `SUPPORTED_LOCALES` and the
+ * trigger's catalog; the trigger falls back to English, so a stray value degrades rather than breaks.
  */
 export const SUPPORTED_LOCALES = ['en-US', 'pt-BR'] as const
 export type SupportedLocale = (typeof SUPPORTED_LOCALES)[number]
 export const BASE_LOCALE: SupportedLocale = 'en-US'
 
 /**
- * Where the invite language is stored on the user.
- *
- * A *custom* attribute, hence the prefix: Cognito only lets standard attributes be declared when the
- * pool is created, so a pool that already has users can never gain one. Must match the
- * `customAttributes` entry in the auth stack.
- *
- * Not named `locale`: that collides with a reserved standard attribute, and the resulting schema
- * entry is indistinguishable from declaring the standard one — so `custom:locale` is never created
- * and every invite fails. See the note in `auth-stack.ts`.
+ * Where the invite language is stored. A *custom* attribute, hence the prefix: a live pool can only
+ * gain custom ones. Not named `locale` — that collides with a reserved standard attribute and the
+ * custom one is then never created. Must match `customAttributes` in the auth stack.
  */
 export const LOCALE_ATTRIBUTE = 'custom:inviteLocale'
 
@@ -57,12 +46,9 @@ export interface UserSummary {
 }
 
 /**
- * Normalizes the `cognito:groups` claim.
- *
- * API Gateway's Cognito authorizer flattens array claims into a string before handing them to the
- * integration, and the shape is not stable across API/token types — it can arrive as `"[a, b]"`,
- * as `"a,b"`, or as a genuine array. Getting this wrong fails open or fails closed depending on the
- * format, so every shape is handled explicitly.
+ * Normalizes the `cognito:groups` claim. The authorizer flattens array claims into a string, and the
+ * shape is not stable across API and token types — `"[a, b]"`, `"a,b"`, or a real array. Getting it
+ * wrong fails open or closed depending on the format, so every shape is handled explicitly.
  */
 export function parseGroupsClaim(raw: unknown): string[] {
   if (Array.isArray(raw)) {
@@ -80,11 +66,8 @@ export function parseGroupsClaim(raw: unknown): string[] {
 }
 
 /**
- * Whether the verified claims carry admin group membership.
- *
- * The claims must come from API Gateway's authorizer context, which is populated only after the
- * token's signature, expiry and issuer have been validated. Never call this with a payload decoded
- * from a raw `Authorization` header — that is attacker-controlled.
+ * Whether the verified claims carry admin membership. They must come from the authorizer context,
+ * populated only after validation — never from a payload decoded out of a raw `Authorization` header.
  */
 export function isAdminClaims(
   claims: Record<string, unknown> | undefined,
@@ -212,14 +195,9 @@ export interface AuditRecord {
 }
 
 /**
- * Shapes one audit line.
- *
- * Emitted as JSON so CloudWatch Logs Insights can answer "who granted this person access, and
- * when." CloudTrail records the underlying Cognito API calls but attributes them to the Lambda's
- * execution role, not the admin who triggered them — this is the record that names the human.
- *
- * Deliberately carries no request body beyond the target email: the actor, the action and the
- * target are the audit facts, and anything more risks writing user content into logs.
+ * One audit line, as JSON. CloudTrail records the Cognito calls but attributes them to the Lambda's
+ * execution role — this is the record that names the human. Carries no request body beyond the
+ * target email: more than the actor, action and target risks writing user content into logs.
  */
 export function auditRecord(
   action: string,
@@ -230,8 +208,7 @@ export function auditRecord(
   return {
     type: 'audit',
     action,
-    // Recorded as `unknown` rather than omitted: an action with no identifiable actor is itself
-    // something worth being able to search for.
+    // `unknown` rather than omitted: an action with no identifiable actor is worth searching for.
     actorSub: actor?.sub ?? 'unknown',
     actorEmail: actor?.email ?? 'unknown',
     ...(extra.target ? { target: extra.target } : {}),

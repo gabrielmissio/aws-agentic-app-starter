@@ -1,12 +1,10 @@
 /**
- * The identity block the chat handler prepends to a prompt before it reaches the agent.
+ * The identity block prepended to a prompt: the only way the agent learns who is asking, built from
+ * claims the gateway authorizer already verified.
  *
- * The only way the agent learns who is asking, built from claims the API Gateway authorizer already
- * verified — so its tools can act for that user without any tool accepting a user id.
- *
- * The format is a contract with `agent/src/caller.ts`. The two cannot import from each other (the
- * agent's Docker build context is its own directory), so both sides assert the exact wire format in
- * their tests and drift fails the build rather than silently detaching agent from caller.
+ * The format is a contract with `agent/src/caller.ts`. The two cannot import from each other — the
+ * agent's Docker build context is its own directory — so both assert the literal wire format in
+ * their tests, and drift fails the build rather than silently detaching agent from caller.
  */
 export interface SessionContext {
   userId: string

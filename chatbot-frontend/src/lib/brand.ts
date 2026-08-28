@@ -1,14 +1,10 @@
 import { Sparkles, type LucideIcon } from 'lucide-react'
 
 /**
- * Everything that makes this app *this* app.
+ * Everything that makes this app *this* app. Rebranding is this file plus the colour tokens in
+ * `styles.css` — no component carries a product identity of its own.
  *
- * The rest of the frontend renders the brand through these three values and the colour tokens in
- * `styles.css`. Starting a different project means editing this file and those tokens — no
- * component carries a product identity of its own.
- *
- * The name and tagline live here rather than in the message catalogs because a product name is not
- * translated; the sentences *around* it are, and those stay in `lib/i18n/messages/`.
+ * Not in the message catalogs, because a product name is not translated; the sentences around it are.
  */
 export const BRAND: { name: string; tagline: string; icon: LucideIcon } = {
   name: 'Aria',

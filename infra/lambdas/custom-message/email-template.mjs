@@ -1,28 +1,22 @@
 /**
- * Copy and HTML for the two Cognito emails `index.mjs` rewrites: the admin-invite (temporary
- * password) message and the self sign-up confirmation code — each in whichever language the
- * recipient's `custom:inviteLocale` attribute names, falling back to English.
- *
- * Split from `index.mjs`, which keeps the trigger's plumbing. Plain `.mjs` with no imports — the
- * asset must stay buildable by nothing.
+ * Copy and HTML for the two emails `index.mjs` rewrites — the admin invite and the sign-up
+ * confirmation code — in whichever language `custom:inviteLocale` names, falling back to English.
+ * Plain `.mjs` with no imports: the asset must stay buildable by nothing.
  *
  * **The markup looks like 2005 on purpose.** Outlook renders with Word's engine and Gmail strips
- * `<style>` blocks, so: tables for layout, every style inline, nothing that needs flexbox, grid or
- * an external stylesheet.
+ * `<style>` blocks: tables for layout, every style inline, no flexbox or grid.
  *
- * **Deliverability is a content property too**, and a prettier email that trips spam heuristics is
- * worse than a plain one. The rules below are each a documented signal — keep them when editing:
+ * **Deliverability is a content property**, and a prettier email that trips spam heuristics is
+ * worse than a plain one. Each rule below is a documented signal — keep them when editing:
  *
- * - **Link text is the destination.** Hiding it (`click here`, a label over a different URL) is one
- *   of the strongest phishing heuristics there is.
- * - **One link, one domain, omitted rather than broken.** Several destinations read as a campaign,
- *   and a call-to-action with nothing behind it reads as broken.
- * - **No images at all** — not blocked, no tracking-pixel shape, no "download images to read this".
- * - **No hidden text**, which rules out the usual white-on-white preheader trick.
+ * - **Link text is the destination.** Hiding it is among the strongest phishing heuristics there is.
+ * - **One link, one domain, omitted rather than broken.**
+ * - **No images** — no blocked assets, no tracking-pixel shape.
+ * - **No hidden text**, which rules out the white-on-white preheader trick.
  * - **It says why you got it**, so an unfamiliar-sender password email does not read as an attack.
  * - **Plain register** — no urgency, no exclamation marks, no capitalised words.
  *
- * **Every cell sets both background and foreground.** Clients forcing dark mode invert what they
+ * **Every cell sets both background and foreground**: clients forcing dark mode invert what they
  * find, and setting only one is how you get black text on a black card.
  */
 
@@ -31,9 +25,8 @@ export const SUPPORTED_LOCALES = ['en-US', 'pt-BR']
 export const BASE_LOCALE = 'en-US'
 
 /**
- * `{username}` and `{####}` are Cognito's own placeholders — it substitutes the username and the
- * temporary password/code when it sends. Losing `{####}` from the invite copy sends a password-less
- * email; losing it from the verification copy sends a code-less one.
+ * `{username}` and `{####}` are Cognito's own placeholders, substituted when it sends. Dropping
+ * `{####}` sends a password-less invite, or a code-less confirmation.
  */
 const COPY = {
   'en-US': {
@@ -76,11 +69,7 @@ const COPY = {
   },
 }
 
-/**
- * Narrows a language tag onto a catalog: exact match, then primary subtag, then English. Mirrors
- * `resolveLocale` in the frontend i18n core, kept separate because this file must stay
- * dependency-free.
- */
+/** Exact match, then primary subtag, then English. Mirrors the frontend's `resolveLocale`. */
 export function resolveLocale(tag) {
   if (typeof tag !== 'string' || !tag.trim()) return BASE_LOCALE
 
@@ -119,12 +108,9 @@ const cell = (content, extra = '') =>
   `<td style="padding:0 32px;font-family:${FONT};font-size:15px;line-height:1.6;color:${INK};background-color:${CARD};${extra}">${content}</td>`
 
 /**
- * The document + table chrome every email shares.
- *
- * A full document — `<!doctype html>`, `<html lang>`, a `<head>` with a charset — not a bare
- * `<table>` fragment. Clients re-wrap a fragment into *some* document, but which is undefined, and
- * one handed a naked `<table>` need not guess charset or language correctly. `lang` matters for
- * pt-BR specifically: without it a screen reader falls back to the device language.
+ * The document and table chrome every email shares. A full document rather than a bare `<table>`:
+ * clients re-wrap a fragment into *some* document, but which one is undefined, and it need not
+ * guess the charset or `lang` correctly — the latter decides what a screen reader speaks.
  */
 function renderShell(rows, locale) {
   return [

@@ -3,22 +3,17 @@ import { z } from 'zod'
 import { currentCaller } from './caller'
 
 /**
- * The agent's toolset — and the place a new project adds its own.
- *
- * The two tools here are deliberately trivial: they exist so the wiring is visible and tested, not
- * because a personal assistant needs nothing else. What they demonstrate is the part that is easy
- * to get wrong.
+ * The agent's toolset — and where a new project adds its own. These two are deliberately trivial;
+ * what they demonstrate is the part that is easy to get wrong.
  *
  * **No tool takes a user id.** `get_signed_in_user` acts for a person and still has an empty input
- * schema, because identity comes from `currentCaller()` — the request-scoped caller the BFF vouched
- * for (see `caller.ts`). A `userId` parameter would make the answer a function of whatever the model
- * was persuaded to pass, and the model reads attacker-influenceable text. Adding a tool that reads
- * or writes someone's data means following that shape: empty schema for "mine", `currentCaller()`
- * for who that is.
+ * schema, because identity comes from `currentCaller()` (see `caller.ts`). A `userId` parameter
+ * would make the answer a function of whatever the model was persuaded to pass, and the model reads
+ * attacker-influenceable text.
  *
- * A tool that reaches a backend belongs behind the same rule. Give the Lambda (or Function URL) its
- * own IAM grant on the runtime's execution role, sign the call with SigV4, and let the *service*
- * scope the read to the caller — never let the tool argument decide whose data comes back.
+ * A tool reaching a backend follows the same rule: grant the runtime role access to it, sign with
+ * SigV4, and let the *service* scope the read to the caller. Never let a tool argument decide whose
+ * data comes back.
  */
 
 /**
@@ -29,11 +24,9 @@ import { currentCaller } from './caller'
 type Json = string | number | boolean | null | { [k: string]: Json } | Json[]
 
 /**
- * The identity the BFF verified, or an explanation the model can relay.
- *
- * Every invocation of a correctly deployed runtime carries one: the BFF is the only caller, and it
- * always prepends the block. A turn without one therefore means the runtime was reached some other
- * way, which is exactly when a tool must not act for anyone.
+ * The identity the BFF verified, or an explanation the model can relay. A correctly deployed runtime
+ * always carries one, so a turn without it means the runtime was reached some other way — exactly
+ * when a tool must not act for anyone.
  */
 function requireCaller(): { userId: string; email?: string; displayName?: string } | { error: string } {
   const caller = currentCaller()
@@ -78,8 +71,7 @@ export function createTools() {
           weekday: new Intl.DateTimeFormat('en-US', { timeZone: zone, weekday: 'long' }).format(now),
         }
       } catch {
-        // `Intl` throws on an unknown zone rather than falling back, and the model can recover from
-        // being told which value it got wrong.
+        // `Intl` throws on an unknown zone; the model can recover from being told which one.
         return { error: `"${zone}" is not a valid IANA timezone. Try "UTC" or a "Region/City" name.` }
       }
     },
