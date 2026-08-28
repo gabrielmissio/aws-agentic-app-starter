@@ -14,6 +14,7 @@
     "lint:fix": "eslint . --fix",
     "synth": "npm --prefix ./infra run synth",
     "deploy": "npm --prefix ./infra run deploy",
+    "deploy:no-approval": "npm --prefix ./infra run deploy:no-approval",
     "destroy": "npm --prefix ./infra run destroy",
     "docker:setup-arm64": "npm --prefix ./infra run docker:setup-arm64"
   },

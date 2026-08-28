@@ -17,6 +17,7 @@ cp .env.example .env
 |---|---|
 | `npm run synth` | Build required dependencies and synthesize the CDK app |
 | `npm run deploy` | Build required dependencies and deploy all stacks |
+| `npm run deploy:no-approval` | The same, without any confirmation prompt — for a sandbox or a pipeline |
 | `npm run deploy:agent` | Deploy only the agent stack |
 | `npm run deploy:bff` | Build the BFF and deploy only the BFF stack |
 | `npm run destroy` | Destroy all stacks |

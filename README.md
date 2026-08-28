@@ -193,8 +193,16 @@ The root package provides a small set of convenience commands for common workflo
 | `npm run audit`              | `npm audit --audit-level=high` in the root package and each subpackage |
 | `npm run synth`              | Build deployable artifacts and synthesize the CDK app                |
 | `npm run deploy`             | Deploy all infrastructure                                            |
+| `npm run deploy:no-approval` | The same, without any confirmation prompt — see the note below        |
 | `npm run destroy`            | Destroy all deployed stacks                                          |
 | `npm run docker:setup-arm64` | Enable local ARM64 Docker emulation for agent image builds           |
+
+`npm run deploy` passes `--require-approval broadening`, so CDK stops for confirmation whenever a
+changeset *widens* IAM or security-group rules. The first deploy of each stack always asks, since
+every role is new; after that only a stack whose diff actually adds permission does.
+`npm run deploy:no-approval` skips that gate entirely. Use it for a disposable sandbox or a
+pipeline — and keep `npm run deploy` as the default everywhere else, since a permission that widened
+without anyone noticing is exactly what the prompt exists to catch.
 
 The audit gate is `high`, not `critical`: a remotely exploitable flaw in a dependency that handles
 request bodies is routinely scored high, and a gate that only stops `critical` lets those through
