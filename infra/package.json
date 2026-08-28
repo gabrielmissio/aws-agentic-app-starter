@@ -10,7 +10,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "docker:setup-arm64": "docker run --privileged --rm tonistiigi/binfmt --install arm64",
-    "build:dependencies": "npm --prefix ../ap2-core run build && npm --prefix ../chatbot-bff run build && npm --prefix ../chatbot-frontend run build",
+    "build:dependencies": "npm --prefix ../chatbot-bff run build && npm --prefix ../chatbot-frontend run build",
     "presynth": "npm run build:dependencies",
     "synth": "dotenvx run -f .env --overload -- cdk synth",
     "predeploy": "npm run build:dependencies",
@@ -21,7 +21,7 @@
     "deploy:bff": "dotenvx run -f .env --overload -- sh -c 'cdk deploy \"$PROJECT_NAME-bff\" --require-approval broadening'"
   },
   "dependencies": {
-    "aws-cdk-lib": "^2.264.0",
+    "aws-cdk-lib": "^2.267.0",
     "constructs": "^10.6.0"
   },
   "devDependencies": {

@@ -4,7 +4,6 @@ import * as ecrassets from 'aws-cdk-lib/aws-ecr-assets'
 import * as iam from 'aws-cdk-lib/aws-iam'
 import { Construct } from 'constructs'
 import { fileURLToPath } from 'node:url'
-import type { Ap2EntitiesStack } from './ap2-entities-stack.js'
 
 export interface AgentStackProps extends cdk.StackProps {
   projectName: string
@@ -15,14 +14,6 @@ export interface AgentStackProps extends cdk.StackProps {
    * execution role is scoped to, so the permission and the configuration cannot disagree.
    */
   modelId: string
-  /**
-   * The AP2 entities the agent's propose-only tools call over SigV4.
-   *
-   * Only the three the agent may reach are granted here. The MPP is deliberately absent: in AP2 the
-   * Merchant drives the processor, so the agent has no path to settlement at the IAM layer — not
-   * merely no tool for it.
-   */
-  ap2?: Ap2EntitiesStack
 }
 
 function compactEnvironment(environment: Record<string, string | undefined>): Record<string, string> {
@@ -45,8 +36,8 @@ function compactEnvironment(environment: Record<string, string | undefined>): Re
  *
  * Adding a Cognito JWT authorizer here would let the browser call the runtime directly, which makes
  * the identity block client-supplied text: any signed-in user could name another user's `sub` and
- * have the agent's payment tools act for them. Do not add one unless the block becomes a signed
- * token the runtime itself verifies.
+ * have the agent's tools act for them. Do not add one unless the block becomes a signed token the
+ * runtime itself verifies.
  */
 export class AgentStack extends cdk.Stack {
   public readonly runtimeArn: string
@@ -58,7 +49,7 @@ export class AgentStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: AgentStackProps) {
     super(scope, id, props)
 
-    const { projectName, imagePlatform, runtimeEnvironment, ap2, modelId } = props
+    const { projectName, imagePlatform, runtimeEnvironment, modelId } = props
 
     const agentDirectory = fileURLToPath(new URL('../../../agent', import.meta.url))
 
@@ -75,7 +66,7 @@ export class AgentStack extends cdk.Stack {
           actions: ['ecr:BatchGetImage', 'ecr:GetDownloadUrlForLayer'],
           // The asset's own repository. A wildcard here let a compromised container read every
           // image in the account — a fast way to enumerate what else the organization builds, and
-          // to pull layers that were never meant to be readable from a payments workload.
+          // to pull layers that were never meant to be readable from this workload.
           resources: [imageAsset.repository.repositoryArn],
         }),
         new iam.PolicyStatement({
@@ -187,12 +178,10 @@ export class AgentStack extends cdk.Stack {
       },
     })
 
-    // The agent's AP2 tools sign their own requests with this role's credentials.
-    if (ap2) {
-      ap2.merchantUrl.grantInvokeUrl(runtimeRole)
-      ap2.consentUrl.grantInvokeUrl(runtimeRole)
-      ap2.cpUrl.grantInvokeUrl(runtimeRole)
-    }
+    // A tool that reaches a backend signs its own request with this role's credentials, so the
+    // grant goes here — e.g. `someLambda.grantInvoke(runtimeRole)` or a Function URL's
+    // `grantInvokeUrl(runtimeRole)`. Keeping the grant on the *runtime* role rather than on a
+    // shared one is what bounds what a compromised container can reach.
 
     const runtime = new bedrockagentcore.CfnRuntime(this, 'AgentRuntime', {
       agentRuntimeName: projectName.replaceAll('-', '_'),
@@ -213,15 +202,9 @@ export class AgentStack extends cdk.Stack {
         // Explicit, so the container runs the model its role is scoped to rather than falling back
         // to its own default and being denied by IAM.
         BEDROCK_MODEL_ID: modelId,
-        // The agent registers its AP2 tools only when all three are present, so an unconfigured
-        // deployment offers none of them rather than offering tools that fail on every call.
-        ...(ap2
-          ? {
-              MERCHANT_URL: ap2.merchantUrl.url,
-              CONSENT_URL: ap2.consentUrl.url,
-              CP_URL: ap2.cpUrl.url,
-            }
-          : {}),
+        // Anything a tool needs to find its backend goes here — a Function URL, a table name. The
+        // agent should register such a tool only when its configuration is present, so an
+        // unconfigured deployment offers no tool rather than one that fails on every call.
         ...runtimeEnvironment,
       }),
       lifecycleConfiguration: {

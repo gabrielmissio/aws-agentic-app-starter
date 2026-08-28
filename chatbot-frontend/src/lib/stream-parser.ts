@@ -16,59 +16,13 @@ export interface StreamCallbacks {
   onToolStart: (toolName: string) => void
   /** Called when the model is thinking/reasoning. */
   onThinking: (text: string) => void
-  /** Called with a status label (e.g. "Using search_products", "Streaming..."). */
+  /** Called with a status label (e.g. "Using get_current_time", "Streaming..."). */
   onStatus: (status: string) => void
   /** Called when the stream completes. */
   onComplete: () => void
   /** Called on error. */
   onError: (error: Error) => void
-  /**
-   * Called when `initiate_consent_session` returns, with the session id — how the UI learns to open
-   * the checkout gate. Only an opaque reference crosses: no amount, no code, nothing the agent could
-   * alter to its advantage.
-   */
-  onConsentProposed?: (sessionId: string) => void
 }
-
-/**
- * Finds the first string value for `key` anywhere in a value, including inside JSON serialized into
- * a string — how tool results commonly arrive. A deep search rather than a fixed path because the
- * SDK's wrapper shape is not stable across versions, and `toolResult.content[0].text` would silently
- * stop matching on an upgrade: the checkout card never appears, reading as a broken agent.
- */
-function deepFindString(node: unknown, key: string): string | undefined {
-  if (typeof node === 'string') {
-    if (!node.includes(`"${key}"`)) return undefined
-    try {
-      return deepFindString(JSON.parse(node), key)
-    } catch {
-      return undefined
-    }
-  }
-
-  if (!node || typeof node !== 'object') return undefined
-
-  if (Array.isArray(node)) {
-    for (const el of node) {
-      const found = deepFindString(el, key)
-      if (found) return found
-    }
-    return undefined
-  }
-
-  const obj = node as Record<string, unknown>
-  const direct = obj[key]
-  if (typeof direct === 'string' && direct) return direct
-
-  for (const value of Object.values(obj)) {
-    const found = deepFindString(value, key)
-    if (found) return found
-  }
-  return undefined
-}
-
-/** Exported for tests: the tool result shapes this has to survive are the whole reason it exists. */
-export const __testing = { deepFindString }
 
 /**
  * Strips inline `<thinking>...</thinking>` blocks from streamed text,
@@ -175,26 +129,15 @@ export async function parseAgentCoreStream(
   /**
    * Signals the end of the stream, exactly once. A finished turn arrives as *both* a
    * `modelMessageStopEvent` with `endTurn` and an `agentResultEvent`, and the final flush signals it
-   * again if neither showed up. Consumers act on completion, so letting it through twice opens two
-   * checkout gates for one proposal — the second overwriting the first one's code.
+   * again if neither showed up. Consumers act on completion — settling the bubble, and whatever a
+   * given screen hangs off the end of a turn — so letting it through twice does that work twice.
    */
   const complete = () => {
     if (completed) return
     completed = true
     callbacks.onComplete()
   }
-  /** The last tool the model started, so a result event can be attributed even without its name. */
-  let lastToolName = ''
   const thinkingFilter = createThinkingFilter(callbacks)
-
-  /** Emits the consent session id once `initiate_consent_session` has produced one. */
-  const maybeEmitConsent = (chunk: Record<string, unknown>) => {
-    if (!callbacks.onConsentProposed) return
-    const toolUse = chunk.toolUse as Record<string, string> | undefined
-    if ((toolUse?.name ?? lastToolName) !== 'initiate_consent_session') return
-    const sessionId = deepFindString(chunk, 'sessionId')
-    if (sessionId) callbacks.onConsentProposed(sessionId)
-  }
 
   try {
     while (true) {
@@ -247,7 +190,6 @@ export async function parseAgentCoreStream(
             const start = inner.start as Record<string, unknown> | undefined
             const toolUse = start?.toolUse as Record<string, string> | undefined
             if (toolUse?.name) {
-              lastToolName = toolUse.name
               callbacks.onToolStart(toolUse.name)
               callbacks.onStatus(`Using ${toolUse.name}`)
             }
@@ -274,7 +216,6 @@ export async function parseAgentCoreStream(
         if (eventType === 'beforeToolCallEvent') {
           const toolUse = chunk.toolUse as Record<string, string> | undefined
           if (toolUse?.name) {
-            lastToolName = toolUse.name
             callbacks.onToolStart(toolUse.name)
             callbacks.onStatus(`Using ${toolUse.name}`)
           }
@@ -282,11 +223,8 @@ export async function parseAgentCoreStream(
         }
 
         // ── afterToolCallEvent / toolResultEvent → tool finished ─────────
-        // `initiate_consent_session`'s result carries the session id the UI needs to open the
-        // checkout gate, so both shapes are inspected for it.
         if (eventType === 'afterToolCallEvent' || eventType === 'toolResultEvent') {
           callbacks.onStatus('Processing result...')
-          maybeEmitConsent(chunk)
           continue
         }
 

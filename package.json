@@ -1,22 +1,21 @@
 {
-  "name": "poc-strands-agents-ts",
+  "name": "aws-agentic-app-starter",
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "bootstrap": "npm ci --ignore-scripts && npm --prefix ./ap2-core ci && npm --prefix ./agent ci && npm --prefix ./chatbot-bff ci && npm --prefix ./chatbot-frontend ci && npm --prefix ./infra ci",
-    "install:all": "npm install --ignore-scripts && npm --prefix ./ap2-core install && npm --prefix ./agent install && npm --prefix ./chatbot-bff install && npm --prefix ./chatbot-frontend install && npm --prefix ./infra install",
-    "install:all:fix": "npm run install:all && npm audit fix && npm --prefix ./ap2-core audit fix && npm --prefix ./agent audit fix && npm --prefix ./chatbot-bff audit fix && npm --prefix ./chatbot-frontend audit fix && npm --prefix ./infra audit fix",
-    "typecheck": "npm --prefix ./ap2-core run typecheck && npm --prefix ./agent run typecheck && npm --prefix ./chatbot-bff run typecheck && npm --prefix ./infra run typecheck && npm --prefix ./chatbot-frontend run typecheck",
-    "test": "npm --prefix ./ap2-core run test && npm --prefix ./agent run test && npm --prefix ./chatbot-bff run test && npm --prefix ./infra run test && npm --prefix ./chatbot-frontend run test",
+    "bootstrap": "npm ci --ignore-scripts && npm --prefix ./agent ci && npm --prefix ./chatbot-bff ci && npm --prefix ./chatbot-frontend ci && npm --prefix ./infra ci",
+    "install:all": "npm install --ignore-scripts && npm --prefix ./agent install && npm --prefix ./chatbot-bff install && npm --prefix ./chatbot-frontend install && npm --prefix ./infra install",
+    "install:all:fix": "npm run install:all && npm audit fix && npm --prefix ./agent audit fix && npm --prefix ./chatbot-bff audit fix && npm --prefix ./chatbot-frontend audit fix && npm --prefix ./infra audit fix",
+    "typecheck": "npm --prefix ./agent run typecheck && npm --prefix ./chatbot-bff run typecheck && npm --prefix ./infra run typecheck && npm --prefix ./chatbot-frontend run typecheck",
+    "test": "npm --prefix ./agent run test && npm --prefix ./chatbot-bff run test && npm --prefix ./infra run test && npm --prefix ./chatbot-frontend run test",
     "verify": "npm run lint && npm run typecheck && npm run test",
-    "audit": "npm audit --audit-level=high && npm --prefix ./ap2-core audit --audit-level=high && npm --prefix ./agent audit --audit-level=high && npm --prefix ./chatbot-bff audit --audit-level=high && npm --prefix ./chatbot-frontend audit --audit-level=high && npm --prefix ./infra audit --audit-level=high",
+    "audit": "npm audit --audit-level=high && npm --prefix ./agent audit --audit-level=high && npm --prefix ./chatbot-bff audit --audit-level=high && npm --prefix ./chatbot-frontend audit --audit-level=high && npm --prefix ./infra audit --audit-level=high",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "synth": "npm --prefix ./infra run synth",
     "deploy": "npm --prefix ./infra run deploy",
     "destroy": "npm --prefix ./infra run destroy",
-    "docker:setup-arm64": "npm --prefix ./infra run docker:setup-arm64",
-    "seed": "npm --prefix ./ap2-core run seed"
+    "docker:setup-arm64": "npm --prefix ./infra run docker:setup-arm64"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

@@ -48,13 +48,13 @@ export function sseHeaders(allowedOrigin: string, requestOrigin?: string): Recor
  * Headers for every JSON response this API returns.
  *
  * `no-store` and `nosniff` are not boilerplate here. Each of these responses is scoped to one
- * caller — a purchase history, a signed evidence trail, an admin user listing — and the routes are
- * plain `GET`s that a browser, a proxy or a `bfcache` entry will happily keep. `no-store` is the
- * only directive that covers all three; `no-cache` still permits storage, and the SSE path uses it
- * for a different reason (keeping a stream from being buffered, not from being retained).
+ * caller — the admin user listing today, whatever per-user data a route returns tomorrow — and the
+ * routes are plain `GET`s that a browser, a proxy or a `bfcache` entry will happily keep.
+ * `no-store` is the only directive that covers all three; `no-cache` still permits storage, and
+ * the SSE path uses it for a different reason (keeping a stream from being buffered).
  *
- * `nosniff` matters because the bodies are attacker-influenceable — a cart summary carries a
- * merchant name and item labels — and a browser that content-sniffs a JSON body it decided looks
+ * `nosniff` matters because the bodies are attacker-influenceable — a user list carries names and
+ * email addresses people chose — and a browser that content-sniffs a JSON body it decided looks
  * like HTML renders it.
  */
 export function jsonHeaders(

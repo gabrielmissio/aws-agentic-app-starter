@@ -4,16 +4,16 @@ import { normalizeMarkdown, splitStreamingMarkdown } from '../lib/markdown'
 describe('normalizeMarkdown', () => {
   it('rebuilds a table the model flattened onto one line', () => {
     const flattened =
-      'Agora vou montar o carrinho.| Campo | Valor | |---|---| | Merchant | TastyGo | | **Total** | R$ 453,50 |'
+      'Aqui está o resumo.| Campo | Valor | |---|---| | Cidade | Lisboa | | **População** | 545 923 |'
 
     expect(normalizeMarkdown(flattened)).toBe(
       [
-        'Agora vou montar o carrinho.',
+        'Aqui está o resumo.',
         '',
         '| Campo | Valor |',
         '| --- | --- |',
-        '| Merchant | TastyGo |',
-        '| **Total** | R$ 453,50 |',
+        '| Cidade | Lisboa |',
+        '| **População** | 545 923 |',
       ].join('\n'),
     )
   })
@@ -32,7 +32,7 @@ describe('normalizeMarkdown', () => {
   })
 
   it('leaves a correctly formatted table alone', () => {
-    const table = ['| Campo | Valor |', '|---|---|', '| Merchant | TastyGo |'].join('\n')
+    const table = ['| Campo | Valor |', '|---|---|', '| Cidade | Lisboa |'].join('\n')
     expect(normalizeMarkdown(table)).toBe(table)
   })
 
@@ -57,18 +57,18 @@ describe('normalizeMarkdown', () => {
   it('opens a blank line before a table the model ran on from its own prose', () => {
     // GFM will not let a table interrupt a paragraph, so without the break the header row is read
     // as more prose and the table never forms.
-    const out = normalizeMarkdown('Seu carrinho:\n| Item | Preco |\n|---|---|\n| Pizza | R$ 45 |')
+    const out = normalizeMarkdown('Resumo:\n| Item | Valor |\n|---|---|\n| Total | 42 |')
     expect(out.split('\n')[1]).toBe('')
-    expect(out).toContain('Seu carrinho:\n\n| Item | Preco |')
+    expect(out).toContain('Resumo:\n\n| Item | Valor |')
   })
 
   it('leaves an already separated table alone', () => {
-    const md = 'Seu carrinho:\n\n| Item | Preco |\n|---|---|\n| Pizza | R$ 45 |'
+    const md = 'Resumo:\n\n| Item | Valor |\n|---|---|\n| Total | 42 |'
     expect(normalizeMarkdown(md)).toBe(md)
   })
 
   it('does not open a break between a table and its own rows', () => {
-    const md = '| Item | Preco |\n|---|---|\n| Pizza | R$ 45 |'
+    const md = '| Item | Valor |\n|---|---|\n| Total | 42 |'
     expect(normalizeMarkdown(md)).toBe(md)
   })
 
@@ -100,18 +100,18 @@ describe('splitStreamingMarkdown', () => {
   it('renders a table the model is flattening as its rows arrive', () => {
     // Once the delimiter row is there, the rest of the line is table rows, not prose.
     const { complete, tail } = splitStreamingMarkdown(
-      'Vou montar o carrinho.| Campo | Valor | |---|---| | Merchant | Tasty',
+      'Aqui está o resumo.| Campo | Valor | |---|---| | Cidade | Lis',
     )
     expect(complete).toBe(
-      ['Vou montar o carrinho.', '', '| Campo | Valor |', '| --- | --- |', '| Merchant | Tasty |'].join('\n'),
+      ['Aqui está o resumo.', '', '| Campo | Valor |', '| --- | --- |', '| Cidade | Lis |'].join('\n'),
     )
     expect(tail).toBe('')
   })
 
   it('still holds back a partial row before the delimiter arrives', () => {
-    expect(splitStreamingMarkdown('Vou montar o carrinho.| Campo | Val')).toEqual({
+    expect(splitStreamingMarkdown('Aqui está o resumo.| Campo | Val')).toEqual({
       complete: '',
-      tail: 'Vou montar o carrinho.| Campo | Val',
+      tail: 'Aqui está o resumo.| Campo | Val',
     })
   })
 

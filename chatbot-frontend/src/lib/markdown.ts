@@ -11,12 +11,8 @@
  * Text-in, text-out, and never applied inside a fenced block — a code sample may contain anything,
  * including a line that looks like a table.
  *
- * ROADMAP: none of this should be load-bearing for the checkout. The cart is structured data the
- * server already holds — `ap2-handler.ts` builds `items`, `merchantName`, `amountCents` and then
- * returns only `summary`, so the UI asks the model to retype what was already computed and repairs
- * the retyping here. Widening `CheckoutIntent` and rendering the cart table from the intent the way
- * `CheckoutCard` already renders the rest would delete the need for the repair on the one message
- * where being wrong costs money. This file stays for the agent's ordinary prose.
+ * A repair, not a guarantee: anything that has to be *right* rather than merely readable belongs in
+ * structured data the UI renders itself, not in prose the model retypes and this file patches up.
  */
 
 /** Matches a delimiter row (`|---|---|`, `| :--- | ---: |`) wherever it appears. */

@@ -3,9 +3,9 @@
 /*
  * Design system — one blue, one neutral ramp, four status hues.
  *
- * Everything visual in this app resolves to a token declared here. Starting a new AP2 project means
- * editing this block and `src/lib/brand.ts`; no component carries a hard-coded colour, so a rebrand
- * never turns into a hunt through JSX.
+ * Everything visual in this app resolves to a token declared here. Rebranding means editing this
+ * block and `src/lib/brand.ts`; no component carries a hard-coded colour, so it never turns into
+ * a hunt through JSX.
  */
 
 @theme inline {
@@ -118,8 +118,7 @@
  * off for the same reason — a radius there leaves a visible bite between the curve and the tail.
  */
 @utility bubble-agent {
-  /* Positioned so an absolutely positioned child of a slot resolves against the bubble rather than
-     against the document — see the note in CheckoutCard. It also anchors the tail. */
+  /* Anchors the tail below, and gives any absolutely positioned child a containing block. */
   position: relative;
   background: var(--card);
   color: var(--card-foreground);
@@ -168,16 +167,6 @@
     border-top-right-radius: 2px;
     transform: rotate(45deg);
   }
-}
-
-/*
- * A bubble whose content is a block that brings its own padding — the receipt.
- *
- * The bubble keeps the shape and the tail; the block inside drops its frame rather than drawing a
- * border inside a border.
- */
-@utility bubble-flush {
-  padding: 0;
 }
 
 /* ── Animations ───────────────────────────────────────────────────────── */

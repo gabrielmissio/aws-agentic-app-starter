@@ -1,6 +1,6 @@
 # Chatbot Frontend
 
-React + Vite chatbot UI for the demo application.
+React + Vite chat UI, with Cognito sign-in and an admin panel.
 
 This package owns the browser experience. It has exactly one transport: every request goes to the BFF, which is also the only thing that can reach the AgentCore runtime. Repository-level architecture and deployment context live in the root [README.md](../README.md).
 
@@ -25,7 +25,7 @@ npm run dev
 ## Design system and reuse
 
 The UI is deliberately plain: one blue, one neutral ramp, four status hues, Inter, and no imagery.
-The point is that a new AP2 project can start from this package and look like its own product after
+The point is that a new project can start from this package and look like its own product after
 editing two files.
 
 | File | Owns |
@@ -36,7 +36,7 @@ editing two files.
 
 `ui/` holds `Button`/`IconButton`, `Card`/`CardHeader`/`CardBody`, `Badge`, `Alert`, `Field`/
 `TextInput`/`Select`, `SegmentedControl`, `EmptyState`, `BrandAvatar`/`InitialsAvatar` and the
-`AppHeader` shared by the chat, the admin panel and the Explorer. The class strings themselves live
+`AppHeader` shared by the chat and the admin panel. The class strings themselves live
 in [`ui/styles.ts`](src/components/ui/styles.ts) as plain functions — so a `<Link>` can look exactly
 like a button without wrapping one, and so React Fast Refresh keeps working in the component modules
 that import them.
@@ -51,9 +51,10 @@ one-line change and nothing has to be downloaded before the first message render
 
 ## Transport
 
-There is one, and it is not configurable: chat and the AP2 checkout routes all go to the BFF at
-`VITE_API_URL`, authenticated with the Cognito id token. Cognito sign-in is required before the chat
-UI is available.
+There is one, and it is not configurable: the chat stream and the admin routes both go to the BFF at
+`VITE_API_URL`, authenticated with the Cognito **id token** — a REST Cognito authorizer declaring no
+scopes reads the credential as an identity token and rejects an access token. Sign-in is required
+before the chat UI is available.
 
 The browser never calls the AgentCore runtime, and that is not configurable. On a direct path the
 agent's identity block — the only way it learns who is asking — would be the opening lines of a
@@ -73,8 +74,9 @@ with no identity pool.
 ## Admin panel
 
 Members of the Cognito `admins` group (see [infra/README.md](../infra/README.md#admin-group)) get an
-**Admin** badge in the chat header opening [`AdminPanel`](src/components/AdminPanel.tsx). No router —
-`App.tsx` swaps which component it renders.
+**Admin** badge in the chat header opening [`AdminPanel`](src/components/AdminPanel.tsx). No router:
+there are no linkable pages here, so `App.tsx` swaps which component it renders. Add a router when a
+deep link becomes real.
 
 The badge is reachability only. [`src/lib/session-roles.ts`](src/lib/session-roles.ts) reads the
 `cognito:groups` claim decoded in the browser, which proves nothing to a server; the BFF's
@@ -95,43 +97,10 @@ see [infra/README.md](../infra/README.md#emails). Server error codes are localiz
 `translateErrorCode()` maps `emailAlreadyExists` onto `error.emailAlreadyExists`, falling back to the
 server's English. The server never ships prose to translate.
 
-## AP2: the checkout card and the proof explorer
-
-Two surfaces make the signed chain usable and checkable.
-
-**The checkout card** renders inside the agent's own bubble, under the proposal it belongs to — a
-floating card invites the question of which cart it is for. It posts straight to the BFF, so the
-agent never sees the code, which is why it exists rather than the agent asking for a number in chat.
-Its shape is chosen by the *server* from the cart's value: a six-digit code above the step-up
-threshold, one tap below. The client is told which and never decides it.
-
-**The proof explorer** (`/explorer`) lists the caller's checkouts and, for each, the trail of who
-signed what and who re-checked it:
-
-| Route | Shows |
-|---|---|
-| `/explorer` | The caller's own checkouts, with a derived status |
-| `/explorer/:journeyId` | One checkout's trail, as a story or as every raw step |
-| `/explorer/actors` | The four signing actors, what each attests, and their public keys |
-
-The timeline is a strict chronological record — a test asserts it never reorders, since reordering
-makes it a summary rather than a record. Two passes merge only *adjacent* entries: the two mandates
-signed in one approval become one "you approved" row, and a run of re-verifications collapses into an
-expandable cluster that still names who checked what.
-
-Explanations live in the message catalogs, but the evidence type codes (`CART_MANDATE`,
-`BLOCKED_TAMPERED_CART`, …) stay language-neutral in both locales — translating them would make the
-trail harder to compare against the specification. A step the catalogs do not cover degrades to a
-readable form of its code, so a new domain step renders before its translations land.
-
-Routing uses real paths rather than hashes, since CloudFront already serves `index.html` for any
-unmatched route, so a link to a proof survives being pasted. The Explorer and the Markdown renderer
-both load on demand.
-
 ## Markdown from the agent
 
-The agent's replies are Markdown and a checkout proposal is a table, so the renderer has to hold up
-under text arriving a token at a time and not always well formed.
+The agent's replies are Markdown, so the renderer has to hold up under text arriving a token at a
+time and not always well formed.
 [`src/lib/markdown.ts`](src/lib/markdown.ts) sits between the stream and the parser:
 
 - **Complete lines parse, the unfinished one does not.** A table fills in row by row while the line
@@ -151,11 +120,12 @@ Use [chatbot-frontend/.env.example](.env.example) as the source of truth.
 
 | Variable | Required | Purpose |
 |---|---|---|
-| `VITE_API_URL` | Yes | Base URL for the BFF — chat and the AP2 checkout routes |
+| `VITE_API_URL` | Yes | Base URL for the BFF — `/chat` and `/admin/users` |
 | `VITE_COGNITO_USER_POOL_ID` | Yes | Cognito user pool ID |
 | `VITE_COGNITO_USER_POOL_CLIENT_ID` | Yes | Cognito app client ID |
 | `VITE_AWS_REGION` | Yes | AWS region used by the frontend config |
 | `VITE_PUBLIC_SIGNUP_ENABLED` | No | `false` hides self sign-up and switches the auth screen to invite-only. Defaults to enabled |
+| `VITE_COGNITO_MFA` | No | `off` \| `optional` \| `required` — which second-factor surfaces the app offers. Mirrors `COGNITO_MFA` in `infra/` |
 
 ## Notes
 

@@ -42,7 +42,7 @@ export class ApiError extends Error {
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const session = await fetchAuthSession({ forceRefresh: false })
-  // The ID token — same authorizer constraint as the chat and checkout clients.
+  // The ID token — same authorizer constraint as the chat client.
   const idToken = session.tokens?.idToken?.toString()
 
   if (!idToken) {

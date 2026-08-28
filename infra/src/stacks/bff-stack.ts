@@ -13,15 +13,7 @@ import * as wafv2 from 'aws-cdk-lib/aws-wafv2'
 import * as subscriptions from 'aws-cdk-lib/aws-sns-subscriptions'
 import { Construct } from 'constructs'
 import { ADMIN_GROUP_NAME } from './auth-stack.js'
-import type { Ap2EntitiesStack } from './ap2-entities-stack.js'
-import type { DataStack } from './data-stack.js'
-import type { SecurityStack } from './security-stack.js'
-import {
-  DEFAULT_AP2_RATE_LIMIT,
-  DEFAULT_USER_RATE_LIMIT,
-  type ApiThrottle,
-  type UserRateLimit,
-} from '../config.js'
+import { DEFAULT_USER_RATE_LIMIT, type ApiThrottle, type UserRateLimit } from '../config.js'
 
 export interface BffStackProps extends cdk.StackProps {
   projectName: string
@@ -43,27 +35,6 @@ export interface BffStackProps extends cdk.StackProps {
   alertEmail?: string
   /** Monthly USD ceiling that triggers a budget notification. Omitted disables the budget. */
   monthlyBudgetUsd?: number
-  /** The AP2 entities, for the Function URLs the checkout handler calls. */
-  ap2: Ap2EntitiesStack
-  /** The intents and evidence tables the checkout handler reads and writes. */
-  data: DataStack
-  /** The HMAC secret and the signing keys whose public halves the Explorer surfaces. */
-  security: SecurityStack
-  /**
-   * How long a user has to authorize a proposed checkout, in minutes. Bounds the window in which a
-   * signed cart, a sealed intent and a one-time code are all simultaneously valid.
-   */
-  intentTtlMinutes: number
-  /** Cart total, in minor units, at or above which checkout requires a one-time code. */
-  otpStepUpThresholdCents: number
-  /**
-   * Requests one signed-in caller gets on the money-moving routes per window. Separate from
-   * `userRateLimit`, which meters `/chat`: a conversation must not be able to spend the checkout
-   * budget, or the reverse.
-   */
-  ap2RateLimit?: UserRateLimit
-  /** Sandbox only: return the real one-time code in the response so the UI can display it. */
-  otpRevealInUi: boolean
   /**
    * Whether a WAF web ACL fronts the API stage. Opt-in via `WAF_ENABLED` in every profile — see
    * `resolveWafEnabled` for why it is a recommendation rather than a gate.
@@ -87,13 +58,6 @@ export class BffStack extends cdk.Stack {
       userRateLimit = DEFAULT_USER_RATE_LIMIT,
       alertEmail,
       monthlyBudgetUsd,
-      ap2,
-      data,
-      security,
-      intentTtlMinutes,
-      otpStepUpThresholdCents,
-      otpRevealInUi,
-      ap2RateLimit = DEFAULT_AP2_RATE_LIMIT,
       wafEnabled = false,
     } = props
 
@@ -127,8 +91,6 @@ export class BffStack extends cdk.Stack {
         RATE_LIMIT_TABLE_NAME: rateLimitTable.tableName,
         USER_RATE_LIMIT: String(userRateLimit.limit),
         USER_RATE_LIMIT_WINDOW_SECONDS: String(userRateLimit.windowSeconds),
-        // Mints the caller identity token the agent forwards to the AP2 entities.
-        KMS_KEY_IDENTITY: security.identityKey.keyArn,
       },
       logGroup: new logs.LogGroup(this, 'ChatFunctionLogs', {
         logGroupName: `/aws/lambda/${projectName}-bff`,
@@ -155,20 +117,6 @@ export class BffStack extends cdk.Stack {
         resources: [rateLimitTable.tableArn],
       }),
     )
-
-    // ── IAM: the caller identity key — Sign, and only on that key ──────
-    // The two BFF functions that speak for a user are the deployment's only `kms:Sign` holders here;
-    // entities get `kms:Verify`, the agent nothing. That asymmetry is what makes an identity token
-    // evidence rather than an assertion.
-    const grantMintIdentity = (target: lambda.Function) =>
-      target.addToRolePolicy(
-        new iam.PolicyStatement({
-          effect: iam.Effect.ALLOW,
-          actions: ['kms:Sign'],
-          resources: [security.identityKey.keyArn],
-        }),
-      )
-    grantMintIdentity(fn)
 
     // ── API Gateway REST API ───────────────────────────────────────────
     // Access logs cover reach; the admin function's own audit lines cover intent. `dataTraceEnabled`
@@ -255,7 +203,9 @@ export class BffStack extends cdk.Stack {
 
     // ── Admin function ─────────────────────────────────────────────────
     // A second function, not more routes on the chat one: this role carries
-    // `cognito-idp:AdminCreate*`, and the function relaying model output must not.
+    // `cognito-idp:AdminCreate*`, and the function relaying model output must not. Keeping a
+    // privileged grant off the role that handles model output is the shape to copy when this
+    // template grows a route that can do something consequential.
     const adminFn = new lambda.Function(this, 'AdminFunction', {
       functionName: `${projectName}-bff-admin`,
       code: lambda.Code.fromAsset('../chatbot-bff', {
@@ -310,140 +260,6 @@ export class BffStack extends cdk.Stack {
       })
     }
 
-    // ── AP2 checkout function ──────────────────────────────────────────
-    // A third function, same reason sharpened: this is the only role holding the HMAC secret,
-    // `sns:Publish` and invoke rights on the AP2 entities. Keeping those off the chat role is what
-    // makes "the agent cannot move money" structural rather than a matter of prompt discipline.
-    const ap2Fn = new lambda.Function(this, 'Ap2Function', {
-      functionName: `${projectName}-bff-ap2`,
-      code: lambda.Code.fromAsset('../chatbot-bff', {
-        exclude: ['node_modules', 'src', '*.ts', 'tsup.config.*', '.env*'],
-      }),
-      handler: 'dist/ap2-handler.handler',
-      runtime: lambda.Runtime.NODEJS_22_X,
-      // Same buffered-integration ceiling as the admin function. `/confirm` is the long pole:
-      // two mandates, a credential, and the MPP's re-verification — four KMS-signing hops.
-      timeout: cdk.Duration.seconds(29),
-      memorySize: 512,
-      architecture: lambda.Architecture.X86_64,
-      environment: {
-        ALLOWED_ORIGIN: allowedOrigin,
-        COGNITO_USER_POOL_ID: userPool.userPoolId,
-        MERCHANT_URL: ap2.merchantUrl.url,
-        CONSENT_URL: ap2.consentUrl.url,
-        CONSENT_DECISION_URL: ap2.consentDecisionUrl.url,
-        CP_URL: ap2.cpUrl.url,
-        INTENTS_TABLE: data.intents.tableName,
-        EVIDENCE_TABLE: data.evidence.tableName,
-        // Only the ARN — the plaintext is fetched at cold start and never enters the template.
-        HMAC_SECRET_ARN: security.hmacSecret.secretArn,
-        INTENT_TTL_MIN: String(intentTtlMinutes),
-        OTP_STEPUP_THRESHOLD_CENTS: String(otpStepUpThresholdCents),
-        OTP_REVEAL_IN_UI: String(otpRevealInUi),
-        // Metered under an `ap2#` key prefix, so this quota is independent of the chat one.
-        RATE_LIMIT_TABLE_NAME: rateLimitTable.tableName,
-        AP2_RATE_LIMIT: String(ap2RateLimit.limit),
-        AP2_RATE_LIMIT_WINDOW_SECONDS: String(ap2RateLimit.windowSeconds),
-        // Read to surface each actor's public key, so an outside party can verify the chain itself.
-        KMS_KEY_MERCHANT: security.merchantKey.keyArn,
-        KMS_KEY_CONSENT: security.consentKey.keyArn,
-        KMS_KEY_CP: security.cpKey.keyArn,
-        KMS_KEY_MPP: security.mppKey.keyArn,
-        // Signed, not read: this function mints the caller identity the entities verify.
-        KMS_KEY_IDENTITY: security.identityKey.keyArn,
-      },
-      logGroup: new logs.LogGroup(this, 'Ap2FunctionLogs', {
-        logGroupName: `/aws/lambda/${projectName}-bff-ap2`,
-        retention: logs.RetentionDays.ONE_MONTH,
-        removalPolicy: cdk.RemovalPolicy.DESTROY,
-      }),
-    })
-
-    security.hmacSecret.grantRead(ap2Fn)
-
-    // UpdateItem only — the same narrow grant the chat function gets, for the same reason: that is
-    // the single operation the conditional check-and-increment needs.
-    ap2Fn.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ['dynamodb:UpdateItem'],
-        resources: [rateLimitTable.tableArn],
-      }),
-    )
-
-    // The entities this function drives. The MPP is absent on purpose: only the Merchant calls it,
-    // so nothing outside the entity stack has a path to settlement.
-    ap2.merchantUrl.grantInvokeUrl(ap2Fn)
-    ap2.consentUrl.grantInvokeUrl(ap2Fn)
-    ap2.cpUrl.grantInvokeUrl(ap2Fn)
-
-    grantMintIdentity(ap2Fn)
-
-    // This function **is** the Trusted Surface, so it is the only principal granted invoke on the
-    // Mandate Authority. The grant appears here and nowhere else — the agent stack has no equivalent
-    // line — which is what makes the AP2 Agent-Provider MUST hold at the IAM layer.
-    ap2.consentDecisionUrl.grantInvokeUrl(ap2Fn)
-
-    // Public keys only: `kms:GetPublicKey` can neither sign nor verify, it just publishes what an
-    // outside party needs to check the chain itself.
-    ap2Fn.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ['kms:GetPublicKey'],
-        resources: [
-          security.merchantKey.keyArn,
-          security.consentKey.keyArn,
-          security.cpKey.keyArn,
-          security.mppKey.keyArn,
-        ],
-      }),
-    )
-
-    // The intents table, including its by-initiator index — the checkout gate's own state.
-    ap2Fn.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem', 'dynamodb:Query'],
-        resources: [data.intents.tableArn, `${data.intents.tableArn}/index/*`],
-      }),
-    )
-
-    // Read-only on the evidence log: the surface that displays the audit trail must not alter it.
-    ap2Fn.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ['dynamodb:Query'],
-        resources: [data.evidence.tableArn],
-      }),
-    )
-
-    // Direct SMS takes a phone number rather than a topic ARN, and AWS documents no resource to
-    // scope it to — so this is one grant that genuinely cannot be narrowed further.
-    ap2Fn.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ['sns:Publish'],
-        resources: ['*'],
-      }),
-    )
-
-    // ── AP2 routes ─────────────────────────────────────────────────────
-    // The handler reads its caller from the authorizer's verified claims and fails closed without
-    // them, so every route needs one. `stacks.test.ts` asserts none can be added without.
-    const ap2Integration = new apigateway.LambdaIntegration(ap2Fn, { proxy: true })
-    const ap2Method = (resource: apigateway.IResource, method: string) =>
-      resource.addMethod(method, ap2Integration, {
-        authorizer,
-        authorizationType: apigateway.AuthorizationType.COGNITO,
-      })
-
-    ap2Method(api.root.addResource('intent'), 'POST')
-    ap2Method(api.root.addResource('confirm'), 'POST')
-    ap2Method(api.root.addResource('decline'), 'POST')
-    ap2Method(api.root.addResource('journeys'), 'GET')
-    ap2Method(api.root.addResource('actors'), 'GET')
-    ap2Method(api.root.addResource('evidence').addResource('{journeyId}'), 'GET')
-
     // ── Operations: alarms and a spend ceiling ──────────────────────────
     // Without these you learn the deployment is broken, or expensive, from a user or an invoice.
     const alarmTopic = new sns.Topic(this, 'AlarmTopic', {
@@ -468,14 +284,6 @@ export class BffStack extends cdk.Stack {
         alarmName: `${projectName}-admin-errors`,
         alarmDescription: 'The admin Lambda is failing — invites and the user list are broken.',
         metric: adminFn.metricErrors({ period: cdk.Duration.minutes(5) }),
-        threshold: 1,
-        evaluationPeriods: 1,
-        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-      }),
-      new cloudwatch.Alarm(this, 'Ap2FunctionErrors', {
-        alarmName: `${projectName}-ap2-errors`,
-        alarmDescription: 'The checkout Lambda is failing — payments cannot be authorized.',
-        metric: ap2Fn.metricErrors({ period: cdk.Duration.minutes(5) }),
         threshold: 1,
         evaluationPeriods: 1,
         treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,

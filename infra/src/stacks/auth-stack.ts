@@ -31,7 +31,7 @@ export interface AuthStackProps extends cdk.StackProps {
   profile?: DeployProfile
   /**
    * Second-factor posture. `required` enrolls every user; `optional` leaves it to them, which for a
-   * system that approves payments means most of them will not.
+   * system holding real conversations means most of them will not.
    */
   mfa?: MfaMode
   /**
@@ -108,9 +108,9 @@ export class AuthStack extends cdk.Stack {
        * update with *"Invalid AttributeDataType input"* — which is what adding it here unconditionally
        * did to an existing deployment. A pool that ever needs it has to be created with it.
        *
-       * The consequence, stated rather than hidden: the checkout step-up has no SMS channel, so
-       * `/intent` refuses any checkout at or above `OTP_STEPUP_THRESHOLD_CENTS` with
-       * `stepUpUnavailable`. Choosing that channel is an open decision, not a missing line here.
+       * The consequence, stated rather than hidden: there is no SMS channel in this deployment at
+       * all, which is why the second factor below is an authenticator app. A feature that needs to
+       * reach a phone has to add the attribute *and* a screen that writes it, on a fresh pool.
        */
       standardAttributes: {
         email: { required: true, mutable: true },
@@ -154,9 +154,9 @@ export class AuthStack extends cdk.Stack {
         emailStyle: cognito.VerificationEmailStyle.CODE,
       },
       /**
-       * Enrollment is not optional outside a demo. An account here approves payments and reads a
-       * purchase history, so a password alone is the whole of the authentication — and `OPTIONAL`
-       * in practice means most people never enroll.
+       * Enrollment is not optional outside a demo. An account here reads and continues someone's
+       * conversations with the agent, so a password alone is the whole of the authentication — and
+       * `OPTIONAL` in practice means most people never enroll.
        *
        * **An authenticator app, and only that.**
        *

@@ -1,4 +1,4 @@
-import { Suspense, lazy, useMemo, type ReactNode } from 'react'
+import { Suspense, lazy, useMemo } from 'react'
 import { normalizeMarkdown, splitStreamingMarkdown } from '@/lib/markdown.ts'
 import { ToolBadgeList } from './ToolBadge.tsx'
 import { BrandAvatar } from './ui/index.ts'
@@ -8,7 +8,7 @@ import { BrandAvatar } from './ui/index.ts'
  *
  * The Markdown renderer and its GFM plugin are the single largest thing this app would otherwise
  * ship on first paint. The lazy boundary means the chunk is fetched on the stream's first line
- * break — long before a checkout table arrives — so the swap is seamless.
+ * break — long before a long answer is finished — so the swap is seamless.
  */
 const AgentMarkdown = lazy(() => import('./AgentMarkdown.tsx'))
 
@@ -74,41 +74,17 @@ export type ChatMessage = {
   activeTool?: string
   /** Whether the message is still being streamed. */
   isStreaming?: boolean
-  /** Status label (e.g. "Using search_products"). */
+  /** Status label (e.g. "Using get_current_time"). */
   status?: string
 }
 
-export function ChatBubble({
-  message,
-  slot,
-}: {
-  message: ChatMessage
-  /**
-   * Rendered inside the bubble, under the text — used for the checkout card and the receipt.
-   *
-   * Inside rather than beside, so an authorization stays visibly attached to the proposal it belongs
-   * to. A card floating between messages invites the question of which cart it is for.
-   */
-  slot?: ReactNode
-}) {
+export function ChatBubble({ message }: { message: ChatMessage }) {
   if (message.role === 'user') {
     return (
       <div className="flex animate-bubble-in justify-end">
         <div className="bubble-user max-w-[85%]">
           <p className="break-words text-sm leading-relaxed">{message.content}</p>
         </div>
-      </div>
-    )
-  }
-
-  // A message that carries only a card — a receipt — is still a message, so it reads as one: the
-  // bubble supplies the shape and the tail, and the card inside drops its own frame rather than
-  // drawing a border inside a border. See `bubble-flush` in styles.css.
-  if (!message.content && slot) {
-    return (
-      <div className="flex animate-bubble-in items-end gap-2">
-        <BrandAvatar size="sm" className="mb-0.5" />
-        <div className="bubble-agent bubble-flush min-w-0 max-w-[85%] flex-1">{slot}</div>
       </div>
     )
   }
@@ -130,7 +106,6 @@ export function ChatBubble({
         {message.status && message.isStreaming && (
           <p className="mt-1.5 text-xs text-subtle">{message.status}</p>
         )}
-        {slot && <div className="mt-3">{slot}</div>}
       </div>
     </div>
   )

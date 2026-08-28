@@ -16,41 +16,39 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import * as cdk from 'aws-cdk-lib'
 import { Match, Template } from 'aws-cdk-lib/assertions'
-import { Ap2EntitiesStack } from '../stacks/ap2-entities-stack.js'
 import { bedrockModelResources } from '../stacks/agent-stack.js'
 import { AuthStack } from '../stacks/auth-stack.js'
 import { BffStack } from '../stacks/bff-stack.js'
-import { DataStack } from '../stacks/data-stack.js'
 import { FrontendStack } from '../stacks/frontend-stack.js'
-import { SecurityStack } from '../stacks/security-stack.js'
 
 const env = { account: '123456789012', region: 'us-east-1' }
 const FAKE_RUNTIME_ARN =
   'arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/fake-runtime-id'
 
+type PolicyStatement = { Action?: string | string[]; Resource?: string | string[] }
+
 /**
- * The AP2 dependencies `BffStack` needs, in one app so cross-stack references resolve. Real stacks,
- * not stubs: the grants under test are made against their actual ARNs.
+ * The statements attached to the role of the function whose handler path is `handler`.
+ *
+ * Joined through the execution role rather than by logical-id prefix: CDK gives the function and its
+ * default policy independently hashed ids, so a prefix match silently returns nothing.
  */
-function ap2Dependencies(app: cdk.App) {
-  const data = new DataStack(app, 'DepData', { projectName: 'test', env })
-  const security = new SecurityStack(app, 'DepSecurity', { projectName: 'test', env })
-  const ap2 = new Ap2EntitiesStack(app, 'DepAp2', {
-    projectName: 'test',
-    data,
-    security,
-    allowedMpps: ['mpp-sandbox-001'],
-    autoProvisionSandboxMethod: true,
-    env,
+function statementsForHandler(template: Template, handler: string): PolicyStatement[] {
+  const functions = Object.values(
+    template.findResources('AWS::Lambda::Function', { Properties: { Handler: handler } }),
+  )
+  expect(functions).toHaveLength(1)
+
+  const roleId = (functions[0].Properties.Role as { 'Fn::GetAtt': [string, string] })['Fn::GetAtt'][0]
+  const policies = template.findResources('AWS::IAM::Policy', {
+    Properties: { Roles: Match.arrayWith([{ Ref: roleId }]) },
   })
-  return {
-    ap2,
-    data,
-    security,
-    intentTtlMinutes: 5,
-    otpStepUpThresholdCents: 10_000,
-    otpRevealInUi: false,
-  }
+  expect(Object.keys(policies).length).toBeGreaterThan(0)
+
+  return Object.values(policies).flatMap((policy) => {
+    const doc = policy.Properties?.PolicyDocument as { Statement?: PolicyStatement[] }
+    return doc?.Statement ?? []
+  })
 }
 
 function synthAuth(props: Partial<ConstructorParameters<typeof AuthStack>[2]> = {}) {
@@ -187,7 +185,6 @@ function synthBff(
     userPool: auth.userPool,
     agentRuntimeArn: FAKE_RUNTIME_ARN,
     throttle: { rateLimit: 10, burstLimit: 20 },
-    ...ap2Dependencies(app),
     env,
     ...overrides,
   })
@@ -323,8 +320,7 @@ describe('BffStack — per-caller rate limit', () => {
       agentRuntimeArn: FAKE_RUNTIME_ARN,
       throttle: { rateLimit: 10, burstLimit: 20 },
       userRateLimit: { limit: 5, windowSeconds: 30 },
-      ...ap2Dependencies(app),
-      env,
+        env,
     })
     const template = Template.fromStack(stack)
 
@@ -369,7 +365,6 @@ function synthFrontend() {
     userPool: auth.userPool,
     agentRuntimeArn: FAKE_RUNTIME_ARN,
     throttle: { rateLimit: 10, burstLimit: 20 },
-    ...ap2Dependencies(app),
     env,
   })
   const frontend = new FrontendStack(app, 'TestFrontend', {
@@ -384,183 +379,45 @@ function synthFrontend() {
   return { stack: frontend, template: Template.fromStack(frontend) }
 }
 
-describe('BffStack — the AP2 checkout function', () => {
-  /** The AP2 routes, as (resource path part, method) pairs. */
-  const AP2_ROUTES: [string, string][] = [
-    ['intent', 'POST'],
-    ['confirm', 'POST'],
-    ['decline', 'POST'],
-    ['journeys', 'GET'],
-    ['actors', 'GET'],
-    ['{journeyId}', 'GET'],
-  ]
-
-  it('is the only principal granted invoke on the Mandate Authority', () => {
+describe('BffStack — every route is authenticated, and the chat role stays narrow', () => {
+  it('gates every method on the API behind the Cognito authorizer', () => {
     const { template } = synthBff()
 
-    // This function *is* the Trusted Surface, so it is the one role AP2 allows to have mandates
-    // signed. The grant living here and only here is what makes the Agent-Provider MUST hold.
-    const statements = statementsForHandler(template, 'dist/ap2-handler.handler')
-    const invokeUrl = statements.filter((st) => {
-      const actions = Array.isArray(st.Action) ? st.Action : [st.Action]
-      return actions.includes('lambda:InvokeFunctionUrl')
-    })
-    expect(invokeUrl.length).toBeGreaterThan(0)
-
-    const targets = JSON.stringify(invokeUrl.map((st) => st.Resource))
-    // Cross-stack, so the reference arrives as an imported output naming the source construct.
-    expect(targets).toContain('ConsentDecisionFn')
-    expect(targets).toContain('ConsentFn')
-    expect(targets).toContain('MerchantFn')
-    expect(targets).toContain('CpFn')
-    // Settlement stays out of reach: only the Merchant calls the MPP.
-    expect(targets).not.toContain('MppFn')
-  })
-
-  it('gates every AP2 route behind the Cognito authorizer', () => {
-    const { template } = synthBff()
-
-    // The handler fails closed without verified claims, which only holds if no route reaches it
+    // Both handlers fail closed without verified claims, which only holds if no route reaches one
     // unauthenticated — so a route added without an authorizer fails here, not in production.
-    const resources = template.findResources('AWS::ApiGateway::Resource')
-    const pathPartOf = (id: string) => resources[id]?.Properties?.PathPart as string | undefined
+    // Asserted over *every* method rather than a known list, so a new route is covered the day it
+    // is added. `OPTIONS` is exempt: CORS preflight carries no Authorization header by definition.
+    const methods = Object.values(template.findResources('AWS::ApiGateway::Method')).filter(
+      (m) => m.Properties.HttpMethod !== 'OPTIONS',
+    )
+    expect(methods.length).toBeGreaterThan(0)
 
-    const methods = Object.values(template.findResources('AWS::ApiGateway::Method'))
-    for (const [pathPart, httpMethod] of AP2_ROUTES) {
-      const match = methods.find((m) => {
-        const resourceId = (m.Properties.ResourceId as { Ref?: string })?.Ref
-        return (
-          m.Properties.HttpMethod === httpMethod &&
-          resourceId !== undefined &&
-          pathPartOf(resourceId) === pathPart
-        )
-      })
-      expect(match, `${httpMethod} /${pathPart}`).toBeDefined()
-      expect(match?.Properties.AuthorizationType).toBe('COGNITO_USER_POOLS')
-      expect(match?.Properties.AuthorizerId).toBeDefined()
+    for (const method of methods) {
+      expect(method.Properties.AuthorizationType).toBe('COGNITO_USER_POOLS')
+      expect(method.Properties.AuthorizerId).toBeDefined()
     }
   })
 
-  it('keeps settlement off the chat function, which relays model output', () => {
+  it('keeps every privileged grant off the function that relays model output', () => {
     const { template } = synthBff()
 
-    // The separation only means anything if the chat role cannot do what the AP2 role can: read the
-    // HMAC secret, publish SMS, or invoke an AP2 entity.
+    // The two-function split only means anything if the chat role cannot do what the admin role
+    // can. This is the invariant to preserve when the template grows a route that does something
+    // consequential: give it its own function, and leave this role alone.
     const chatStatements = statementsForHandler(template, 'dist/handler.handler')
     const rendered = JSON.stringify(chatStatements)
+
+    expect(rendered).not.toContain('cognito-idp:')
     expect(rendered).not.toContain('secretsmanager')
+    expect(rendered).not.toContain('kms:')
     expect(rendered).not.toContain('sns:Publish')
     expect(rendered).not.toContain('lambda:InvokeFunctionUrl')
 
-    // One KMS action, and only one: signing the caller identity it hands the agent. It must not be
-    // able to sign or verify anything in the AP2 chain — a chat function that could sign a mandate
-    // would be a chat function that could pay.
-    const kmsActions = chatStatements
+    // What it may do, exhaustively: invoke the one runtime, and meter its own caller.
+    const actions = chatStatements
       .flatMap((st) => (Array.isArray(st.Action) ? st.Action : [st.Action]))
-      .filter((a) => String(a).startsWith('kms:'))
-    expect(kmsActions).toEqual(['kms:Sign'])
-    const kmsResources = JSON.stringify(
-      chatStatements
-        .filter((st) => JSON.stringify(st.Action ?? '').includes('kms:'))
-        .map((st) => st.Resource),
-    )
-    expect(kmsResources).toContain('IdentityKey')
-    for (const role of ['MerchantKey', 'ConsentKey', 'CpKey', 'MppKey']) {
-      expect(kmsResources).not.toContain(role)
-    }
-  })
-
-  it('meters the checkout function against the per-caller quota table', () => {
-    // A quota on /chat alone leaves the money-moving routes with only the account-wide stage
-    // throttle, so one caller could present codes to /confirm as fast as the stage allowed.
-    const { template } = synthBff()
-    template.hasResourceProperties('AWS::Lambda::Function', {
-      Handler: 'dist/ap2-handler.handler',
-      Environment: {
-        Variables: Match.objectLike({
-          RATE_LIMIT_TABLE_NAME: Match.anyValue(),
-          AP2_RATE_LIMIT: Match.anyValue(),
-          AP2_RATE_LIMIT_WINDOW_SECONDS: Match.anyValue(),
-        }),
-      },
-    })
-  })
-
-  it('gives the checkout function no way to write to the evidence log', () => {
-    const { template } = synthBff()
-
-    // The surface that displays the audit trail must not be able to alter it. Only the entities
-    // append, and even they cannot amend.
-    const statements = statementsForHandler(template, 'dist/ap2-handler.handler')
-    const evidenceStatements = statements.filter((s) =>
-      JSON.stringify(s.Resource ?? '').includes('Evidence'),
-    )
-    expect(evidenceStatements.length).toBeGreaterThan(0)
-    for (const statement of evidenceStatements) {
-      const actions = statement.Action
-      expect(Array.isArray(actions) ? actions : [actions]).toEqual(['dynamodb:Query'])
-    }
-  })
-
-  it('touches the AP2 keys only to publish them, and signs only its own identity key', () => {
-    const { template } = synthBff()
-
-    // Publishing the public halves lets an outside party check the chain. Sign or verify on an AP2
-    // role key would make this role a participant in the trust it only exposes. Its one signing
-    // grant is on the identity key, which signs no artifact — only who a call acts for.
-    const statements = statementsForHandler(template, 'dist/ap2-handler.handler')
-    const kmsStatements = statements.filter((s) => JSON.stringify(s.Action ?? '').includes('kms:'))
-    expect(kmsStatements.length).toBeGreaterThan(0)
-
-    for (const statement of kmsStatements) {
-      const actions = Array.isArray(statement.Action) ? statement.Action : [statement.Action]
-      const resources = JSON.stringify(statement.Resource)
-      if (actions.includes('kms:Sign')) {
-        expect(actions).toEqual(['kms:Sign'])
-        expect(resources).toContain('IdentityKey')
-        for (const role of ['MerchantKey', 'ConsentKey', 'CpKey', 'MppKey']) {
-          expect(resources).not.toContain(role)
-        }
-      } else {
-        expect(actions).toEqual(['kms:GetPublicKey'])
-      }
-    }
-  })
-
-  it('never templates the HMAC secret value into the function environment', () => {
-    const { template } = synthBff()
-
-    // Only the ARN travels. Templating the plaintext would put the key that seals every checkout
-    // into CloudFormation, the console, and every deploy log.
-    const fns = Object.values(
-      template.findResources('AWS::Lambda::Function', {
-        Properties: { Handler: 'dist/ap2-handler.handler' },
-      }),
-    )
-    expect(fns).toHaveLength(1)
-
-    const vars = fns[0].Properties.Environment.Variables as Record<string, unknown>
-    expect(vars.HMAC_SECRET_ARN).toBeDefined()
-    expect(JSON.stringify(vars.HMAC_SECRET_ARN)).toContain('Ref')
-    expect(vars).not.toHaveProperty('HMAC_SECRET')
-  })
-
-  it('stays within the API Gateway buffered-integration ceiling', () => {
-    const { template } = synthBff()
-
-    // /confirm is the long pole — four KMS-signing hops — but a timeout past the gateway's hard 29s
-    // would just keep billing after the caller has already been handed a 504.
-    template.hasResourceProperties('AWS::Lambda::Function', {
-      Handler: 'dist/ap2-handler.handler',
-      Timeout: Match.exact(29),
-    })
-  })
-
-  it('alarms on checkout failures, not only on chat failures', () => {
-    const { template } = synthBff()
-    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
-      AlarmName: 'test-ap2-errors',
-    })
+      .filter((a) => typeof a === 'string' && !String(a).startsWith('logs:'))
+    expect(actions.sort()).toEqual(['bedrock-agentcore:InvokeAgentRuntime', 'dynamodb:UpdateItem'])
   })
 })
 
@@ -616,454 +473,11 @@ describe('FrontendStack — security response headers', () => {
   })
 })
 
-// ── AP2 ──────────────────────────────────────────────────────────────────
-
-function synthAp2(retainData = true) {
-  const app = new cdk.App()
-  const data = new DataStack(app, 'TestData', { projectName: 'test', retainData, env })
-  const security = new SecurityStack(app, 'TestSecurity', { projectName: 'test', retainData, env })
-  const entities = new Ap2EntitiesStack(app, 'TestAp2', {
-    projectName: 'test',
-    data,
-    security,
-    allowedMpps: ['mpp-sandbox-001'],
-    autoProvisionSandboxMethod: true,
-    env,
-  })
-  return {
-    data: Template.fromStack(data),
-    security: Template.fromStack(security),
-    entities: Template.fromStack(entities),
-    entitiesStack: entities,
-  }
-}
-
-type PolicyStatement = { Action?: string | string[]; Resource?: string | string[] }
-
-/** Every IAM statement in the stack, flattened out of the policies that carry them. */
-function allStatements(template: Template): PolicyStatement[] {
-  return Object.values(template.findResources('AWS::IAM::Policy')).flatMap((policy) => {
-    const doc = policy.Properties?.PolicyDocument as { Statement?: PolicyStatement[] }
-    return doc?.Statement ?? []
-  })
-}
-
-/**
- * The statements attached to the role of the function whose handler path is `handler`.
- *
- * Joined through the execution role rather than by logical-id prefix: CDK gives the function and its
- * default policy independently hashed ids, so a prefix match silently returns nothing.
- */
-function statementsForHandler(template: Template, handler: string): PolicyStatement[] {
-  const functions = Object.values(
-    template.findResources('AWS::Lambda::Function', { Properties: { Handler: handler } }),
-  )
-  expect(functions).toHaveLength(1)
-
-  const roleId = (functions[0].Properties.Role as { 'Fn::GetAtt': [string, string] })['Fn::GetAtt'][0]
-  const policies = template.findResources('AWS::IAM::Policy', {
-    Properties: { Roles: Match.arrayWith([{ Ref: roleId }]) },
-  })
-  expect(Object.keys(policies).length).toBeGreaterThan(0)
-
-  return Object.values(policies).flatMap((policy) => {
-    const doc = policy.Properties?.PolicyDocument as { Statement?: PolicyStatement[] }
-    return doc?.Statement ?? []
-  })
-}
-
-describe('SecurityStack — one signing key per entity', () => {
-  it('creates four ECC_NIST_P256 SIGN_VERIFY keys and nothing symmetric', () => {
-    const { security } = synthAp2()
-
-    // Separate keys are the security model: each entity signs with its own, so a compromised
-    // Merchant still cannot forge the user's consent. Five, not four: the fifth is the BFF's caller
-    // identity key, which signs no AP2 artifact and which no entity may sign with.
-    security.resourceCountIs('AWS::KMS::Key', 5)
-    const keys = Object.values(security.findResources('AWS::KMS::Key'))
-    expect(keys).toHaveLength(5)
-    for (const key of keys) {
-      expect(key.Properties.KeySpec).toBe('ECC_NIST_P256')
-      // ES256's random nonce is what satisfies AP2's non-deterministic-signature requirement for
-      // the Checkout JWT; a symmetric or deterministic key here would silently violate it.
-      expect(key.Properties.KeyUsage).toBe('SIGN_VERIFY')
-    }
-  })
-
-  it('generates the HMAC secret rather than templating a plaintext value', () => {
-    const { security } = synthAp2()
-
-    // The plaintext must never reach the template or an environment variable — only the ARN does.
-    security.hasResourceProperties('AWS::SecretsManager::Secret', {
-      GenerateSecretString: Match.objectLike({ PasswordLength: 64 }),
-    })
-    const secrets = Object.values(security.findResources('AWS::SecretsManager::Secret'))
-    for (const secret of secrets) {
-      expect(secret.Properties).not.toHaveProperty('SecretString')
-    }
-  })
-
-  it('retains the signing keys by default, because destroying one voids the audit trail', () => {
-    expect(
-      Object.values(synthAp2(true).security.findResources('AWS::KMS::Key')).every(
-        (k) => k.DeletionPolicy === 'Retain',
-      ),
-    ).toBe(true)
-    expect(
-      Object.values(synthAp2(false).security.findResources('AWS::KMS::Key')).every(
-        (k) => k.DeletionPolicy === 'Delete',
-      ),
-    ).toBe(true)
-  })
-})
-
-describe('DataStack — AP2 tables', () => {
-  it('provisions a table per concern, all on-demand', () => {
-    const { data } = synthAp2()
-    const tables = Object.values(data.findResources('AWS::DynamoDB::Table'))
-    expect(tables).toHaveLength(9)
-    for (const table of tables) {
-      expect(table.Properties.BillingMode).toBe('PAY_PER_REQUEST')
-    }
-  })
-
-  it('gives the credentials and intents tables a TTL, so consumed state prunes itself', () => {
-    const { data } = synthAp2()
-    // The credentials table also holds the anti-replay markers, which must expire with the tokens
-    // that carried them — without a TTL they accumulate forever.
-    data.hasResourceProperties('AWS::DynamoDB::Table', {
-      TableName: 'test-payment-credentials',
-      TimeToLiveSpecification: { AttributeName: 'ttl', Enabled: true },
-    })
-    data.hasResourceProperties('AWS::DynamoDB::Table', {
-      TableName: 'test-ap2-intents',
-      TimeToLiveSpecification: { AttributeName: 'ttl', Enabled: true },
-    })
-  })
-
-  it('keys the evidence log by journey and time, the shape the trail is read in', () => {
-    const { data } = synthAp2()
-    data.hasResourceProperties('AWS::DynamoDB::Table', {
-      TableName: 'test-evidence-log',
-      KeySchema: [
-        { AttributeName: 'journeyId', KeyType: 'HASH' },
-        { AttributeName: 'sk', KeyType: 'RANGE' },
-      ],
-    })
-  })
-
-  it('honours retainData, the same switch the user pool and frontend bucket use', () => {
-    expect(
-      Object.values(synthAp2(false).data.findResources('AWS::DynamoDB::Table')).every(
-        (t) => t.DeletionPolicy === 'Delete',
-      ),
-    ).toBe(true)
-  })
-})
-
-describe('caller identity is signed, and only the BFF can sign it', () => {
-  /**
-   * Identity is a signed artifact rather than a body field the entities believe, and the whole
-   * guarantee rests on one asymmetry: the BFF holds `kms:Sign` on the identity key, the entities
-   * hold verify-only, and the agent holds nothing. AP2 requires exactly this posture —
-   * *"All LLMs and Agents MUST be considered potential attackers."*
-   */
-  it('gives no entity the ability to sign an identity', () => {
-    const { entities } = synthAp2()
-
-    for (const handler of [
-      'handlers/merchant.handler',
-      'handlers/consent-mandates.handler',
-      'handlers/consent-decision.handler',
-      'handlers/credential-provider.handler',
-      'handlers/mpp.handler',
-      'handlers/evidence.handler',
-    ]) {
-      const signsIdentity = statementsForHandler(entities, handler).some((st) => {
-        const actions = Array.isArray(st.Action) ? st.Action : [st.Action]
-        return actions.includes('kms:Sign') && JSON.stringify(st.Resource).includes('IdentityKey')
-      })
-      expect(signsIdentity, handler).toBe(false)
-    }
-  })
-
-  it('lets exactly the four caller-resolving entities verify one', () => {
-    const { entities } = synthAp2()
-
-    const verifiesIdentity = (handler: string) =>
-      statementsForHandler(entities, handler).some((st) => {
-        const actions = Array.isArray(st.Action) ? st.Action : [st.Action]
-        return actions.includes('kms:Verify') && JSON.stringify(st.Resource).includes('IdentityKey')
-      })
-
-    // These four answer "for which user?" — a journey's, a session's, a payment method's owner, and
-    // the person a mandate is about to be signed for. The MPP and the Evidence Store never do, so
-    // they get nothing.
-    expect(verifiesIdentity('handlers/merchant.handler')).toBe(true)
-    expect(verifiesIdentity('handlers/consent-mandates.handler')).toBe(true)
-    expect(verifiesIdentity('handlers/credential-provider.handler')).toBe(true)
-    // The Mandate Authority checks the session it is signing over belongs to the caller the token
-    // names. Without this grant that check fails closed at runtime and every checkout stops — a
-    // failure no unit test upstream can see, which is why it is pinned here.
-    expect(verifiesIdentity('handlers/consent-decision.handler')).toBe(true)
-    expect(verifiesIdentity('handlers/mpp.handler')).toBe(false)
-    expect(verifiesIdentity('handlers/evidence.handler')).toBe(false)
-  })
-
-  it('puts the identity key ARN in the environment of every entity that verifies one', () => {
-    const { entities } = synthAp2()
-    const fns = entities.findResources('AWS::Lambda::Function')
-
-    // `KmsSigner.fromEnv` treats the identity ARN as optional, so a function granted `kms:Verify`
-    // but missing the variable constructs happily and then refuses every caller. The grant and the
-    // ARN only mean something together.
-    for (const handler of [
-      'handlers/merchant.handler',
-      'handlers/consent-mandates.handler',
-      'handlers/consent-decision.handler',
-      'handlers/credential-provider.handler',
-    ]) {
-      const fn = Object.values(fns).find(
-        (f) => (f.Properties as { Handler?: string }).Handler === handler,
-      )
-      const env = (fn?.Properties as { Environment?: { Variables?: Record<string, unknown> } })
-        ?.Environment?.Variables
-      expect(env?.KMS_KEY_IDENTITY, handler).toBeDefined()
-    }
-  })
-
-  it('leaves the agent stack with no grant on the identity key', () => {
-    // Same reasoning as the Mandate Authority test below: `AgentStack` builds a Docker image and is
-    // not synthesized here, so the guarantee is read off its source. The agent forwards the token it
-    // was handed; a grant here would let it mint one for anybody.
-    const source = readFileSync(new URL('../stacks/agent-stack.ts', import.meta.url), 'utf8')
-    expect(source).not.toContain('identityKey')
-  })
-})
-
-describe('DataStack — recoverability', () => {
-  it('enables point-in-time recovery on every table', () => {
-    const { data } = synthAp2()
-
-    // RETAIN protects against the stack being destroyed. It does nothing about the failure that
-    // actually happens — a bad deploy, a wrong DeleteItem, a TTL in the wrong unit — and for the
-    // evidence and mandate tables that trail *is* the product.
-    const tables = Object.values(data.findResources('AWS::DynamoDB::Table'))
-    expect(tables.length).toBeGreaterThan(0)
-    for (const table of tables) {
-      expect(
-        table.Properties.PointInTimeRecoverySpecification,
-        table.Properties.TableName as string,
-      ).toEqual({ PointInTimeRecoveryEnabled: true })
-    }
-  })
-
-  it('indexes the intents table by journey, so ownership is asked of the journey', () => {
-    const { data } = synthAp2()
-
-    // Asking "does one of my intents mention this journey?" is a question a caller can arrange the
-    // answer to. Asking "whose journey is this?" needs a lookup keyed by the journey.
-    data.hasResourceProperties('AWS::DynamoDB::Table', {
-      TableName: Match.stringLikeRegexp('ap2-intents'),
-      GlobalSecondaryIndexes: Match.arrayWith([
-        Match.objectLike({
-          IndexName: 'byJourney',
-          KeySchema: Match.arrayWith([{ AttributeName: 'journeyId', KeyType: 'HASH' }]),
-        }),
-      ]),
-    })
-  })
-})
-
-describe('Ap2EntitiesStack — the Mandate Authority is a boundary, not a convention', () => {
-  /**
-   * AP2 [Agent Authorization §Trusted Agent Provider]: *"The Agent Provider MUST ensure that the
-   * Agent is not able to access the Agent Provider signing key, **or use it without the Trusted
-   * Surface**."*
-   *
-   * Function-URL IAM authorizes per function, never per operation, so while `submit_consent_decision`
-   * shared a URL with the session operations the agent legitimately calls, every principal able to
-   * open a session was also able — at the IAM layer — to have mandates signed. These assertions pin
-   * the split that fixed it.
-   */
-  it('gives the consent session function no KMS authority whatsoever', () => {
-    const { entities } = synthAp2()
-
-    const statements = statementsForHandler(entities, 'handlers/consent-mandates.handler')
-    const kmsStatements = statements.filter((st) => JSON.stringify(st.Action ?? '').includes('kms:'))
-    const actions = kmsStatements.flatMap((st) =>
-      Array.isArray(st.Action) ? st.Action : [st.Action],
-    )
-
-    // Read-only KMS, and only on the BFF's identity key — it resolves who opened a session and can
-    // sign nothing whatsoever. The AP2 key ARNs stay in its environment because `KmsSigner.fromEnv`
-    // needs all four to construct, and an ARN is not a permission.
-    expect(actions).not.toContain('kms:Sign')
-    expect(actions.length).toBeGreaterThan(0)
-    const resources = JSON.stringify(kmsStatements.map((st) => st.Resource))
-    expect(resources).toContain('IdentityKey')
-    for (const role of ['MerchantKey', 'ConsentKey', 'CpKey', 'MppKey']) {
-      expect(resources).not.toContain(role)
-    }
-  })
-
-  it('grants kms:Sign on the Consent key to the Mandate Authority alone', () => {
-    const { entities } = synthAp2()
-
-    const signers = [
-      'handlers/merchant.handler',
-      'handlers/consent-mandates.handler',
-      'handlers/consent-decision.handler',
-      'handlers/credential-provider.handler',
-      'handlers/mpp.handler',
-      'handlers/evidence.handler',
-    ].filter((handler) =>
-      statementsForHandler(entities, handler).some((st) => {
-        const actions = Array.isArray(st.Action) ? st.Action : [st.Action]
-        return actions.includes('kms:Sign')
-      }),
-    )
-
-    // The Merchant, CP and MPP each sign with their own key; the consent surface's signer is the
-    // decision function, and the session function is absent from this list entirely.
-    expect(signers).toContain('handlers/consent-decision.handler')
-    expect(signers).not.toContain('handlers/consent-mandates.handler')
-    expect(signers).not.toContain('handlers/evidence.handler')
-  })
-
-  it('puts the two consent operations behind two separate Function URLs', () => {
-    const { entities } = synthAp2()
-
-    const functions = entities.findResources('AWS::Lambda::Function')
-    const idFor = (handler: string) =>
-      Object.entries(functions).find(([, fn]) => fn.Properties.Handler === handler)?.[0]
-
-    const sessionId = idFor('handlers/consent-mandates.handler')
-    const decisionId = idFor('handlers/consent-decision.handler')
-    expect(sessionId).toBeDefined()
-    expect(decisionId).toBeDefined()
-    expect(sessionId).not.toBe(decisionId)
-
-    // One URL per function is what makes a per-caller grant expressible at all: with one shared
-    // function there is no IAM statement that says "sessions yes, signing no".
-    const urls = Object.values(entities.findResources('AWS::Lambda::Url')).map(
-      (u) => (u.Properties.TargetFunctionArn as { 'Fn::GetAtt': [string, string] })['Fn::GetAtt'][0],
-    )
-    expect(urls).toContain(sessionId)
-    expect(urls).toContain(decisionId)
-    for (const url of Object.values(entities.findResources('AWS::Lambda::Url'))) {
-      expect(url.Properties.AuthType).toBe('AWS_IAM')
-    }
-  })
-
-  it('leaves the agent stack with no grant on the Mandate Authority', () => {
-    // `AgentStack` is not synthesized here (see the file header — it builds a Docker image), so the
-    // guarantee is asserted against its source: the property exists on the entities stack, and the
-    // agent stack must never reference it. A future `consentDecisionUrl.grantInvokeUrl(runtimeRole)`
-    // would reopen exactly the hole this split closed, and would fail here.
-    const source = readFileSync(new URL('../stacks/agent-stack.ts', import.meta.url), 'utf8')
-    expect(source).toContain('consentUrl.grantInvokeUrl')
-    expect(source).not.toContain('consentDecisionUrl')
-  })
-})
-
-describe('Ap2EntitiesStack — least privilege', () => {
-  it('exposes every entity URL as IAM-authenticated, never public', () => {
-    const { entities } = synthAp2()
-    const urls = Object.values(entities.findResources('AWS::Lambda::Url'))
-
-    // A single public URL here would expose an entity that signs with a KMS key to the internet.
-    expect(urls.length).toBeGreaterThan(0)
-    for (const url of urls) {
-      expect(url.Properties.AuthType).toBe('AWS_IAM')
-    }
-  })
-
-  it('lets only the MPP verify all four keys, and lets each entity sign with just its own', () => {
-    const { entities } = synthAp2()
-    const signStatements = allStatements(entities).filter((s) =>
-      JSON.stringify(s.Action ?? '').includes('kms:Sign'),
-    )
-
-    // Four signing entities (the Evidence Store holds no key), each granted exactly one key ARN.
-    expect(signStatements).toHaveLength(4)
-    for (const statement of signStatements) {
-      const resources = statement.Resource
-      expect(Array.isArray(resources) ? resources : [resources]).toHaveLength(1)
-    }
-  })
-
-  it('grants the Evidence Store no KMS access at all', () => {
-    const { entities } = synthAp2()
-
-    // The Evidence Store records what happened; it does not attest to anything. A signing or
-    // verifying key on this role would be authority it has no reason to hold.
-    const statements = statementsForHandler(entities, 'handlers/evidence.handler')
-    expect(statements.length).toBeGreaterThan(0)
-    for (const statement of statements) {
-      expect(JSON.stringify(statement.Action ?? '')).not.toContain('kms:')
-    }
-  })
-
-  it('grants the Merchant no access to the credential store', () => {
-    const { entities } = synthAp2()
-
-    // Role separation has to hold at the IAM layer too: the Merchant drives the MPP but must never
-    // be able to read or redeem a credential itself.
-    const statements = statementsForHandler(entities, 'handlers/merchant.handler')
-    const resources = JSON.stringify(statements.map((s) => s.Resource))
-    expect(resources).not.toContain('Credentials')
-    expect(resources).not.toContain('PmRegistry')
-  })
-
-  it('gives entities write-only access to the evidence log, so nothing can rewrite the trail', () => {
-    const { entities } = synthAp2()
-    // The four verifying entities append to the trail; only the Evidence Store reads it back.
-    for (const handler of [
-      'handlers/merchant.handler',
-      // The consent *session* function appends nothing — it signs nothing. The Mandate Authority
-      // does, so it is the one carrying the consent surface's evidence grant.
-      'handlers/consent-decision.handler',
-      'handlers/credential-provider.handler',
-      'handlers/mpp.handler',
-    ]) {
-      const statements = statementsForHandler(entities, handler)
-      const evidenceStatements = statements.filter((s) =>
-        JSON.stringify(s.Resource ?? '').includes('Evidence'),
-      )
-      expect(evidenceStatements).toHaveLength(1)
-      // Append-only: an entity may add to the record of what it did, and cannot amend or erase it.
-      // CloudFormation collapses a single-element action list to a bare string, so normalize first.
-      const actions = evidenceStatements[0].Action
-      expect(Array.isArray(actions) ? actions : [actions]).toEqual(['dynamodb:PutItem'])
-    }
-  })
-
-  it('bounds every entity log group instead of leaving Lambda to create one that never expires', () => {
-    const { entities } = synthAp2()
-    const groups = Object.values(entities.findResources('AWS::Logs::LogGroup'))
-    // Six: the five AP2 entities plus the Mandate Authority, the consent surface's signing half.
-    expect(groups).toHaveLength(6)
-    for (const group of groups) {
-      expect(group.Properties.RetentionInDays).toBeGreaterThan(0)
-    }
-  })
-
-  it('runs every entity on the same Node runtime the rest of the app targets', () => {
-    const { entities } = synthAp2()
-    const functions = Object.values(entities.findResources('AWS::Lambda::Function'))
-    expect(functions).toHaveLength(6)
-    for (const fn of functions) {
-      expect(fn.Properties.Runtime).toBe('nodejs22.x')
-    }
-  })
-})
-
 describe('the pilot posture is in the template, not only in the README', () => {
   it('enrols every user in a second factor when MFA is required', () => {
     const { template } = synthAuth({ profile: 'pilot', mfa: 'required' })
 
-    // An account here approves payments and reads a purchase history. `OPTIONAL` would mean most
+    // An account here reads and continues someone's conversations. `OPTIONAL` would mean most
     // people never enrol, which is the same as `OFF` with better paperwork.
     template.hasResourceProperties('AWS::Cognito::UserPool', {
       MfaConfiguration: 'ON',

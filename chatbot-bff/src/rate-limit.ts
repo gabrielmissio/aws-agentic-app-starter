@@ -36,33 +36,6 @@ export function resolveRateLimitConfig(
   }
 }
 
-/**
- * The checkout quota — tighter than the chat one, and metered under its own key.
- *
- * A normal checkout is two or three calls (`/intent`, then `/confirm` or `/decline`), so this is
- * generous for a person and short for a loop. It is the ceiling that was missing on `/confirm`:
- * before it, the only limit on presenting codes was the account-wide stage throttle, which every
- * other caller shares. `MAX_OTP_ATTEMPTS` bounds guesses against one intent; this bounds how many
- * intents a caller can mint to get fresh ones.
- */
-export const DEFAULT_AP2_RATE_LIMIT: RateLimitConfig = { limit: 10, windowSeconds: 60 }
-
-/** Reads AP2_RATE_LIMIT / AP2_RATE_LIMIT_WINDOW_SECONDS, falling back to `DEFAULT_AP2_RATE_LIMIT`. */
-export function resolveAp2RateLimitConfig(
-  env: Record<string, string | undefined> = process.env,
-): RateLimitConfig {
-  const limit = Number(env.AP2_RATE_LIMIT)
-  const windowSeconds = Number(env.AP2_RATE_LIMIT_WINDOW_SECONDS)
-
-  return {
-    limit: Number.isFinite(limit) && limit > 0 ? limit : DEFAULT_AP2_RATE_LIMIT.limit,
-    windowSeconds:
-      Number.isFinite(windowSeconds) && windowSeconds > 0
-        ? windowSeconds
-        : DEFAULT_AP2_RATE_LIMIT.windowSeconds,
-  }
-}
-
 export interface RateLimitResult {
   allowed: boolean
   /** Seconds until the caller can retry — only set when `allowed` is false. */

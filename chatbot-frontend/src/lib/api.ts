@@ -10,8 +10,8 @@ import { readAppConfig } from './app-config'
  * layering preference. The agent learns who is asking from an identity block the BFF prepends to the
  * prompt, built from claims the API Gateway Cognito authorizer already verified. Were the browser to
  * speak to AgentCore directly, that block would be the opening lines of a request body it composed —
- * so anyone able to type into the chat box could name any `userId` and the agent's payment tools
- * would act for them. See `infra/src/stacks/agent-stack.ts` for the deployment-side half.
+ * so anyone able to type into the chat box could name any `userId` and have the agent's tools act
+ * for them. See `infra/src/stacks/agent-stack.ts` for the deployment-side half.
  */
 
 const BFF_URL = readAppConfig('VITE_API_URL') ?? '/api'

@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react'
 
 /**
- * The chrome every full-screen surface shares — chat, admin and the Explorer.
+ * The chrome every full-screen surface shares — the chat and the admin panel.
  *
  * One header rather than three near-identical ones: the height, the alignment and the divider are
  * decided here, so a new screen in a new project inherits them for free. It spans the same

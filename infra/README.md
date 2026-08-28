@@ -1,6 +1,6 @@
 # Infra
 
-AWS CDK application for provisioning the demo infrastructure.
+AWS CDK application for provisioning the template's infrastructure.
 
 This package owns the cloud resources for authentication, the Bedrock AgentCore runtime, the BFF, and the static frontend. Repository-level architecture and positioning live in the root [README.md](../README.md).
 
@@ -26,47 +26,38 @@ cp .env.example .env
 
 ## Stacks
 
-The CDK app provisions seven stacks, in dependency order:
+The CDK app provisions four stacks, in dependency order:
 
 | Stack | What it holds |
 |---|---|
-| `data` | The AP2 DynamoDB tables — one per concern, all on-demand |
-| `security` | One KMS signing key per AP2 entity, plus the BFF's HMAC secret |
-| `auth` | Cognito user pool and the admin group |
-| `ap2` | The six AP2 entity Lambdas and their IAM-authenticated Function URLs — the consent surface is two of them, so only the Mandate Authority holds `kms:Sign` |
+| `auth` | Cognito user pool, the admin group, and the CustomMessage email trigger |
 | `agent` | The agent container and the Bedrock AgentCore Runtime |
-| `bff` | API Gateway plus the chat, admin and checkout Lambdas |
-| `frontend` | S3 and CloudFront hosting |
+| `bff` | API Gateway plus the chat and admin Lambdas, the per-caller quota table, alarms, the budget and the optional web ACL |
+| `frontend` | S3 and CloudFront hosting, plus the runtime `config.js` |
 
-`data` and `security` come first because the entity roles are granted against their ARNs, so the
-dependency runs one way and there is no cycle to work around.
+`agent` before `bff` because the BFF's role is scoped to the runtime ARN; `bff` before `frontend`
+because the frontend's `config.js` carries the API URL. `agent` needs nothing from `auth` at all —
+see the note on the transport below for why that is the point rather than an oversight.
 
-### Why the AP2 resources are shaped this way
+### Where a data layer goes
 
-**A table per entity, not one shared table.** The design rests on entities being independently
-scoped — "the Merchant has no access to the credential store" has to be expressible as *no grant*,
-and that needs separate resources.
+There is deliberately none: this template stores no domain data, and the one table it does create —
+the per-caller rate-limit counter — belongs to the BFF that reads it. A project that adds one should
+add a `data` stack ahead of `agent` and `bff`, and follow two rules:
 
-**A key per entity, not one signing key.** This is the security model, not tidiness: a compromised
-Merchant still cannot forge the user's consent, because it has no way to sign with the consent key.
-The MPP is the one role that legitimately verifies all four, since it is the last verifier before
-money moves.
+**Grants are identity-based, not resource-based.** `table.grantReadWriteData(role)` writes the
+consumer's role into the *resource's* policy, which lives in the data stack — making that stack
+depend on its consumers, which already depend on it. Adding the statement to the consumer's own role
+keeps the dependency one-directional and is equally effective, since a table's default policy
+delegates to account IAM.
 
-**Grants are identity-based, not resource-based.** `key.grant()` and `table.grantReadWriteData()`
-write the entity's role into the *resource's* policy, which lives in `security` or `data` — making
-those stacks depend on `ap2`, which already depends on them. Identity policies keep the dependency
-one-directional; the keys' and tables' default policies delegate to account IAM, so the grant is
-equally effective.
+**Grant the narrowest verb that works.** The rate-limit grant is `dynamodb:UpdateItem` and nothing
+else, because a conditional check-and-increment is the only operation the code performs. A read-only
+consumer of an audit trail gets `Query` and no write, so the surface that displays a log cannot
+amend it.
 
-**The evidence log is append-only at the IAM layer.** Each entity gets `dynamodb:PutItem` and nothing
-else on it. An audit log its own writers can amend or erase is not one.
-
-**Every entity URL is `AuthType=AWS_IAM`.** A single public one would expose a function that signs
-with a KMS key to the internet. The MPP's URL is granted to the Merchant alone, so the agent has no
-path to settlement even at the IAM layer.
-
-`stacks.test.ts` asserts each of these against the synthesized template, so they fail in CI rather
-than in review.
+`stacks.test.ts` asserts the security properties in [Guardrails](#guardrails) against the
+synthesized template, so they fail in CI rather than in review.
 
 ## Environment variables
 
@@ -77,20 +68,20 @@ Use [infra/.env.example](.env.example) as the source of truth.
 | `AWS_REGION` | Yes | Target deployment region |
 | `PROJECT_NAME` | Yes | Prefix used for stack and resource naming |
 | `AGENT_IMAGE_PLATFORM` | No | Docker platform for the agent image build |
+| `DEPLOY_PROFILE` | No | `demo` (default), `pilot` or `prod`. Decides what everything below is *allowed* to be — see [Guardrails](#guardrails) |
+| `DEPLOY_ACCOUNT` / `DEPLOY_REGION` | Under `pilot`/`prod` | The account and region this stack belongs in. A mismatch fails the synth before a resource is described |
+| `BEDROCK_MODEL_ID` | No | The model the agent invokes. Its execution role is scoped to this model and no other |
+| `COGNITO_MFA` | No | `off` (default), `optional` or `required`. Authenticator app (TOTP) only |
+| `COGNITO_THREAT_PROTECTION` | No | `off` (default), `audit` or `enforced`. Anything but `off` moves the pool to the billed Plus plan |
+| `WAF_ENABLED` | No | A web ACL in front of the API stage. Off by default in every profile |
 | `PUBLIC_SIGNUP_ENABLED` | No | `true` (default): visitors can self sign-up. `false`: invite-only — see below |
 | `APP_URL` | No | Canonical app URL, linked from the invite/verification emails. Unset, falls back to the frontend stack's CloudFront URL — see [Emails](#emails) |
-| `ALLOWED_MPPS` | No | Which payment processors a credential may be scoped to. The CP refuses to issue one naming anything outside this list |
-| `AUTO_PROVISION_SANDBOX_METHOD` | No | `true` (default): mint a sandbox payment method for a user who has none, so a new account is not stuck at checkout with nothing to pay with |
-| `OTP_STEPUP_THRESHOLD_CENTS` | No | Cart total, in minor units, at or above which checkout requires a one-time code. `0` means always. Default `10000`. **A step-up is only offered when a code can be delivered** — see the note below |
-| `INTENT_TTL_MIN` | No | How long a user has to authorize a proposed checkout. Bounds the window in which a signed cart, a sealed intent and a code are all simultaneously valid — a security parameter, not just a UX one. Default `5` |
-| `OTP_REVEAL_IN_UI` | No | Sandbox only: return the real code in the `/intent` response so the UI can display it when SMS is unavailable. Verification is unchanged, but anyone who can read the response gets the code. Never enable in a real environment |
 | `RETAIN_DATA` | No | `true` (default): the user pool and frontend bucket survive `cdk destroy`. `false`: disposable environment — see below |
 | `ALERT_EMAIL` | No | Subscribed to the CloudWatch alarms and the budget notification |
 | `MONTHLY_BUDGET_USD` | No | Monthly spend ceiling that triggers a budget notification at 80%/100%. Requires `ALERT_EMAIL` |
 | `API_RATE_LIMIT` / `API_BURST_LIMIT` | No | Requests/second (and burst above it) allowed on the API stage. Default `10` / `20` |
 | `ALLOWED_ORIGIN` | No | Browser origin allowed to call the BFF (CORS). Default `*` — see [Guardrails](#guardrails) |
 | `USER_RATE_LIMIT` / `USER_RATE_LIMIT_WINDOW_SECONDS` | No | Requests one signed-in caller gets on `/chat` per window (seconds). Default `20` / `60` — see [Guardrails](#guardrails) |
-| `AP2_RATE_LIMIT` / `AP2_RATE_LIMIT_WINDOW_SECONDS` | No | The same, for `/intent`, `/confirm` and `/decline`. Metered under its own key and tighter, because these are the routes that move money. Default `10` / `60` |
 
 Additional runtime environment variables for the agent can also be passed through this package, including model and tool configuration.
 
@@ -104,21 +95,12 @@ Additional runtime environment variables for the agent can also be passed throug
 > prepends to the prompt, built from claims the gateway authorizer already verified. The block is
 > plain text, so it is exactly as trustworthy as whoever could have written it. A JWT authorizer on
 > the runtime would let the browser call it directly, making "whoever" any signed-in user — and the
-> agent's payment tools would act for whatever `userId` the block named.
+> agent's tools would act for whatever `userId` the block named.
 >
 > There is no Cognito identity pool at all, and adding one is the quiet way to bring that problem
 > back, since every policy on its authenticated role is a policy granted to anyone who can sign in.
 > `src/__tests__/stacks.test.ts` asserts the pool is absent, that no role is federated to Cognito,
 > and that nothing here grants `InvokeAgentRuntime`, so a direct path cannot appear unnoticed.
-
-> **A step-up needs a channel, and this pool has none.** The code goes out by SMS to the caller's
-> `phone_number` claim, but the user pool only collects an email — so `phone_number` is never
-> present and the SMS is never sent. `/intent` therefore refuses any checkout at or above
-> `OTP_STEPUP_THRESHOLD_CENTS` with `stepUpUnavailable`, instead of opening a code field nobody can
-> fill. Three ways forward, in increasing order of assurance: raise the threshold above what the demo
-> ever charges; set `OTP_REVEAL_IN_UI=true` for a sandbox, which returns the real code in the
-> response and is recorded in the signed mandate as `OTP_SANDBOX_REVEALED` rather than `OTP_SMS`; or
-> add a real channel. See `docs/assessments/assessment.md` C2.
 
 ## User provisioning (invite-only)
 

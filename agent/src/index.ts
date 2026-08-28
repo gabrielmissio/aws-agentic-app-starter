@@ -1,7 +1,7 @@
 import express, { type NextFunction, type Request, type Response } from 'express'
 import { createAgent } from './agent'
 import { MAX_BODY_BYTES, MAX_BODY_LENGTH } from './limits'
-import { parsePrompt, withCaller } from './tools/ap2/caller'
+import { parsePrompt, withCaller } from './caller'
 
 const app = express()
 const PORT = process.env.PORT || 8080
@@ -47,7 +47,7 @@ app.post(
       // The BFF prepends a block naming the caller it authenticated. Splitting it off here means the
       // identity is bound to the request's async context, where tools read it directly — so no tool
       // has to take a user id as a parameter, and no prompt can talk the agent into using another
-      // one. A request with no block simply carries no caller; see tools/ap2/caller.ts.
+      // one. A request with no block simply carries no caller; see caller.ts.
       const { caller, message: prompt } = parsePrompt(raw)
 
       // AgentCore forwards the runtime session id as a header; use it to look up this

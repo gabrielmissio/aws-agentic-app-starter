@@ -49,7 +49,7 @@ export const CARD_CLASS = 'rounded-xl border border-border bg-card shadow-[var(-
 
 export type Tone = 'neutral' | 'primary' | 'success' | 'warning' | 'danger'
 
-/** The five status hues, used by badges, alerts and the Explorer's banners alike. */
+/** The five status hues, shared by badges and alerts so a status reads the same everywhere. */
 export const TONE_CLASS: Record<Tone, string> = {
   neutral: 'border-border bg-muted text-muted-foreground',
   primary: 'border-blue-200 bg-primary-light text-primary-dark',

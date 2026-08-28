@@ -67,8 +67,8 @@ export type MfaMode = (typeof MFA_MODES)[number]
 
 /**
  * Defaults to `off` — a sandbox where every reviewer would otherwise have to enroll an authenticator
- * before seeing the demo. `pilot` and `prod` require `required`: an account takeover on this system
- * approves payments and reads someone's purchase history, and a password is not a second factor.
+ * before seeing the demo. `pilot` and `prod` require `required`: an account takeover here reads and
+ * continues someone's conversations with the agent, and a password is not a second factor.
  */
 export function resolveMfaMode(input?: string): MfaMode {
   const normalized = input?.trim().toLowerCase()
@@ -184,13 +184,11 @@ export function assertDeploymentTarget(target: {
 export interface DeploymentPosture {
   profile: DeployProfile
   publicSignUpEnabled: boolean
-  otpRevealInUi: boolean
   allowedOrigin: string
   alertEmail?: string
   mfa: MfaMode
   threatProtection: ThreatProtectionMode
   retainData: boolean
-  autoProvisionSandboxMethod: boolean
 }
 
 /** One violated rule: what is wrong, and the variable that fixes it. */
@@ -221,12 +219,6 @@ export function assertDeploymentPosture(p: DeploymentPosture): void {
       'must be false. Open sign-up lets anyone mint accounts, which defeats the per-user quotas and puts strangers on a deployment holding real data.',
     )
   }
-  if (p.otpRevealInUi) {
-    fail(
-      'OTP_REVEAL_IN_UI',
-      'must be false. Returning the code on the channel that requested it proves possession of nothing — the step-up becomes decoration, and the mandate says a step-up happened.',
-    )
-  }
   if (p.allowedOrigin === '*') {
     fail(
       'ALLOWED_ORIGIN',
@@ -242,7 +234,7 @@ export function assertDeploymentPosture(p: DeploymentPosture): void {
   if (p.mfa !== 'required') {
     fail(
       'COGNITO_MFA',
-      'must be "required". An account on this system can approve payments and read a purchase history.',
+      'must be "required". A password alone is one leaked credential away from someone else\'s conversations.',
     )
   }
   if (p.threatProtection === 'off') {
@@ -254,13 +246,6 @@ export function assertDeploymentPosture(p: DeploymentPosture): void {
   if (!p.retainData) {
     fail('RETAIN_DATA', 'must be true. A stack replacement would otherwise take every account with it.')
   }
-  if (p.profile === 'prod' && p.autoProvisionSandboxMethod) {
-    fail(
-      'AUTO_PROVISION_SANDBOX_METHOD',
-      'must be false in prod. It mints a fake instrument for any account that has none.',
-    )
-  }
-
   if (violations.length === 0) return
 
   throw new Error(
@@ -277,7 +262,7 @@ export function assertDeploymentPosture(p: DeploymentPosture): void {
 /**
  * Parses a boolean-ish environment variable, throwing on anything unrecognized. Every caller governs
  * something a silent default gets quietly wrong: who can sign up, whether accounts survive a
- * teardown, whether a payment needs a step-up.
+ * teardown, whether a web ACL fronts the API.
  */
 function parseBoolean(input: string | undefined, fallback: boolean, name: string): boolean {
   const normalized = input?.trim().toLowerCase()
@@ -406,36 +391,7 @@ export function resolveUserRateLimit(limitInput?: string, windowInput?: string):
   }
 }
 
-export const DEFAULT_AP2_RATE_LIMIT: UserRateLimit = { limit: 10, windowSeconds: 60 }
-
-/**
- * Requests one caller gets on `/intent`, `/confirm` and `/decline` per window. Metered under its own
- * key so a conversation cannot spend the checkout budget or the reverse, and tighter because a
- * normal checkout is two or three calls.
- */
-export function resolveAp2RateLimit(limitInput?: string, windowInput?: string): UserRateLimit {
-  const parse = (input: string | undefined, fallback: number, name: string) => {
-    const trimmed = input?.trim()
-    if (!trimmed) return fallback
-
-    const value = Number(trimmed)
-    if (!Number.isFinite(value) || value <= 0) {
-      throw new Error(`${name} must be a positive number: ${input}`)
-    }
-
-    return value
-  }
-
-  return {
-    limit: parse(limitInput, DEFAULT_AP2_RATE_LIMIT.limit, 'AP2_RATE_LIMIT'),
-    windowSeconds: parse(
-      windowInput,
-      DEFAULT_AP2_RATE_LIMIT.windowSeconds,
-      'AP2_RATE_LIMIT_WINDOW_SECONDS',
-    ),
-  }
-}
-
+/** The Docker platform the agent image is built for. Defaults to the AgentCore target, arm64. */
 export function resolveAgentImagePlatform(input?: string): ecrassets.Platform | undefined {
   const normalized = input?.trim().toLowerCase()
 
@@ -467,79 +423,4 @@ export const DEFAULT_BEDROCK_MODEL_ID = 'global.anthropic.claude-sonnet-4-6'
 export function resolveBedrockModelId(input?: string): string {
   const trimmed = input?.trim()
   return trimmed && trimmed.length > 0 ? trimmed : DEFAULT_BEDROCK_MODEL_ID
-}
-
-// ── AP2 ─────────────────────────────────────────────────────────────────
-
-/** The default MPP identity a payment credential may be scoped to. */
-export const DEFAULT_TARGET_MPP = 'mpp-sandbox-001'
-
-/**
- * Which MPPs the Credential Provider will scope a credential to. The CP refuses any MPP outside this
- * list, which is what makes "settles via a processor we chose" enforceable. Blank entries are
- * dropped, so a stray comma cannot authorize an empty MPP id.
- */
-export function resolveAllowedMpps(input?: string): string[] {
-  const parsed = (input ?? '')
-    .split(',')
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0)
-
-  return parsed.length > 0 ? parsed : [DEFAULT_TARGET_MPP]
-}
-
-/**
- * Whether the CP mints a sandbox payment method for a user who has none. Defaults to `true`, or a
- * new account reaches checkout with nothing to pay with and reads as broken rather than empty.
- */
-export function resolveAutoProvisionSandboxMethod(input?: string): boolean {
-  return parseBoolean(input, true, 'AUTO_PROVISION_SANDBOX_METHOD')
-}
-
-/** The default step-up threshold, in minor units — R$100.00. */
-export const DEFAULT_OTP_STEPUP_THRESHOLD_CENTS = 10_000
-
-/**
- * Cart total, in minor units, at or above which checkout requires an OTP step-up; below it a
- * one-tap confirm on the sealed intent is the approval. `0` means always. An unparseable value
- * throws rather than defaulting — silently making every payment frictionless is unnoticeable.
- */
-export function resolveOtpStepUpThresholdCents(input?: string): number {
-  const trimmed = input?.trim()
-  if (!trimmed) return DEFAULT_OTP_STEPUP_THRESHOLD_CENTS
-
-  const value = Number(trimmed)
-  if (!Number.isInteger(value) || value < 0) {
-    throw new Error(`OTP_STEPUP_THRESHOLD_CENTS must be a non-negative integer: ${input}`)
-  }
-
-  return value
-}
-
-/** The default lifetime of a checkout approval window, in minutes. */
-export const DEFAULT_INTENT_TTL_MINUTES = 5
-
-/**
- * How long a user has to authorize a proposed checkout. Bounds the window in which a signed cart, a
- * sealed intent and an OTP are simultaneously valid — a security parameter, not just a UX one.
- */
-export function resolveIntentTtlMinutes(input?: string): number {
-  const trimmed = input?.trim()
-  if (!trimmed) return DEFAULT_INTENT_TTL_MINUTES
-
-  const value = Number(trimmed)
-  if (!Number.isFinite(value) || value <= 0) {
-    throw new Error(`INTENT_TTL_MIN must be a positive number: ${input}`)
-  }
-
-  return value
-}
-
-/**
- * Whether the BFF returns the real one-time code in its `/intent` response. Sandbox only: SNS SMS
- * reaches verified numbers alone, so without this a reviewer with no verified phone cannot check
- * out. Verification is unchanged, but anyone who can read the response gets the code.
- */
-export function resolveOtpRevealInUi(input?: string): boolean {
-  return parseBoolean(input, false, 'OTP_REVEAL_IN_UI')
 }
