@@ -32,6 +32,15 @@ const app = new cdk.App()
 const projectName =
   app.node.tryGetContext('projectName') ?? process.env.PROJECT_NAME ?? DEFAULT_PROJECT_NAME
 
+// Applied to every taggable resource in every stack, which is what makes a cost report possible:
+// Cost Explorer groups by tag, and an untagged Lambda or table is spend nobody can attribute.
+// One key is enough — two deployments cannot share an account and region anyway, since every
+// resource name here is prefixed with PROJECT_NAME and would collide.
+//
+// The key must be activated as a cost allocation tag in Billing before it appears as a cost
+// dimension. Note that the budget in `BffStack` does NOT filter on it — see the note there.
+cdk.Tags.of(app).add('Project', projectName)
+
 const env = {
   account: process.env.CDK_DEFAULT_ACCOUNT,
   region: process.env.CDK_DEFAULT_REGION ?? process.env.AWS_REGION ?? DEFAULT_REGION,

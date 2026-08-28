@@ -69,7 +69,7 @@ because a conditional check-and-increment is the only operation the code perform
 | `APP_URL` | Canonical app URL for the emails. Unset, falls back to what `frontend` published to SSM |
 | `RETAIN_DATA` | `true` (default): the user pool and frontend bucket survive `cdk destroy` |
 | `ALERT_EMAIL` | Subscribes an address to the three CloudWatch alarms and the budget. They fire either way |
-| `MONTHLY_BUDGET_USD` | Notifies at 80% and 100%. Needs `ALERT_EMAIL`. A budget alerts; it cannot stop spend |
+| `MONTHLY_BUDGET_USD` | Notifies at 80% and 100%. Needs `ALERT_EMAIL`. A budget alerts; it cannot stop spend. Scoped to the **whole account**, not this project — see [.env.example](.env.example) |
 | `API_RATE_LIMIT` / `API_BURST_LIMIT` | Stage throttling, default `10`/`20`. Unset, the stage inherits the account's 10,000 rps |
 | `ALLOWED_ORIGIN` | CORS allowlist, default `*` — the CloudFront URL does not exist on a first deploy. Close it and redeploy `-bff` once it does |
 | `USER_RATE_LIMIT` / `USER_RATE_LIMIT_WINDOW_SECONDS` | `/chat` calls per caller per window, default `20`/`60`. `API_RATE_LIMIT` bounds the account and cannot stop one caller consuming all of it |

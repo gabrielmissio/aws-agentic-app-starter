@@ -289,7 +289,14 @@ export class BffStack extends cdk.Stack {
       alarm.addAlarmAction(new cwactions.SnsAction(alarmTopic))
     }
 
-    // A budget alerts; it cannot stop spend. Account-wide by nature, so it needs an address.
+    // A budget alerts; it cannot stop spend. It also measures the WHOLE ACCOUNT, not this project,
+    // despite the name: there is no `costFilters` below.
+    //
+    // That is the deliberate choice between two failure modes. Filtering on
+    // `TagKeyValue: ['user:Project$<name>']` would scope it exactly — but a cost allocation tag has
+    // to be activated in Billing by hand first, and a budget filtered on an unactivated tag tracks
+    // zero and never fires. Over-alerting in a shared account is loud and fixable; a guardrail that
+    // silently measures nothing is the one you find out about from the invoice.
     if (monthlyBudgetUsd && alertEmail) {
       new budgets.CfnBudget(this, 'MonthlyBudget', {
         budget: {

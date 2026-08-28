@@ -1,0 +1,33 @@
+version: 2
+
+# The `npm audit --audit-level=high` gate in ci.yml reports what is already vulnerable; nothing in
+# the repository moves a dependency forward. Without this, that gate stays green until the day it
+# fails the build, and then it fails on somebody's unrelated pull request.
+#
+# One entry per lockfile: npm workspaces are not used here — each package installs independently
+# (see `npm run bootstrap`), so Dependabot has to be pointed at each `package.json` in turn.
+updates:
+  - package-ecosystem: npm
+    directories:
+      - /
+      - /agent
+      - /chatbot-bff
+      - /chatbot-frontend
+      - /infra
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      # Patch and minor bumps arrive as one reviewable pull request per package rather than a queue
+      # of near-identical ones. Majors stay separate: those are the ones worth reading.
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  # The actions in ci.yml are pinned to commit SHAs, which is what makes them safe and also what
+  # makes them invisible to a human reading for staleness. This is what moves the pin.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
