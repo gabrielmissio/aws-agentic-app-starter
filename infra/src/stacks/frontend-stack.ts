@@ -20,9 +20,13 @@ export interface FrontendStackProps extends cdk.StackProps {
   projectName: string
   /** The BFF API base URL, injected into the runtime config the SPA reads. */
   bffUrl: string
-  // Cognito values written into a runtime config object served from S3
+  // Written into the runtime config object served from S3, for Amplify to sign in with.
   cognitoUserPoolId: string
   cognitoUserPoolClientId: string
+  /**
+   * Not part of that config — Amplify derives the region from the user pool id. This builds the
+   * `connect-src` hosts in the CSP below, which is its only use and reason enough to keep it.
+   */
   cognitoRegion: string
   /** Mirrors AuthStackProps.publicSignUpEnabled — tells the SPA which auth screen to render. */
   publicSignUpEnabled: boolean
@@ -151,7 +155,6 @@ export class FrontendStack extends cdk.Stack {
     // without these values being baked into the Vite build.
     const configContent = `window.__APP_CONFIG__ = ${JSON.stringify({
       VITE_API_URL: bffUrl.replace(/\/$/, ''),
-      VITE_AWS_REGION: cognitoRegion,
       VITE_COGNITO_USER_POOL_ID: cognitoUserPoolId,
       VITE_COGNITO_USER_POOL_CLIENT_ID: cognitoUserPoolClientId,
       VITE_PUBLIC_SIGNUP_ENABLED: String(publicSignUpEnabled),
