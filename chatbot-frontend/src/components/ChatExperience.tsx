@@ -245,6 +245,10 @@ export function ChatExperience({ userEmail, isAdmin, onSignOut, onOpenAdmin }: C
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}
+            // Mirrors MAX_MESSAGE_LENGTH in chatbot-bff/src/http.ts, kept in sync by hand: the two
+            // packages build separately. The server rejects a longer message either way — this only
+            // decides whether the user finds out while typing or after pressing send.
+            maxLength={8000}
             placeholder={t('chat.inputPlaceholder')}
             aria-label={t('chat.inputPlaceholder')}
             className="h-10 flex-1 rounded-full border border-border bg-background px-4 text-base text-foreground transition-colors placeholder:text-subtle hover:border-slate-300 focus:border-primary focus:outline-none sm:text-sm"

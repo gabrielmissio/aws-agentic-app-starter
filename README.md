@@ -2,7 +2,7 @@
 
 A starting point for an agentic application on AWS: a Strands agent in TypeScript on Amazon Bedrock
 AgentCore Runtime, reached through one pattern — **Frontend → BFF → AgentCore Runtime** — with
-authentication, user management, guardrails and infrastructure already in place.
+authentication, user management, cost and abuse controls, and infrastructure already in place.
 
 The domain is deliberately thin. The agent is a general-purpose personal assistant with two example
 tools, so what you inherit is the scaffolding, not someone else's product.
@@ -18,7 +18,9 @@ tools, so what you inherit is the scaffolding, not someone else's product.
   plus an admin panel for inviting users from the browser
 * CDK infrastructure for all of it, with a **deployment-profile gate** that refuses to synthesize a
   pilot still carrying sandbox defaults
-* Opt-in guardrails: data retention, alarms, a budget, request throttling, WAF
+* Opt-in operational controls: data retention, alarms, an account budget, request throttling, WAF —
+  what a deployment costs and who may reach it. Model output is not filtered; see
+  [what this template leaves open](#what-this-template-leaves-open)
 
 ## Quick start
 
@@ -139,6 +141,14 @@ validation and a fixed caller id: it exercises the streaming path, not the autho
 | `npm run destroy` | Destroy all stacks |
 | `npm run docker:setup-arm64` | Enable local ARM64 emulation for the agent image build |
 
+`verify` and `audit` are also what CI runs on every push and pull request
+(`.github/workflows/ci.yml`), so the two agree by construction. Nothing there needs AWS credentials.
+Dependency updates arrive as pull requests from Dependabot (`.github/dependabot.yml`) — the audit
+gate reports what is already vulnerable, and something has to move the versions forward.
+
+There is no deploy pipeline: `deploy` runs from your machine against whatever credentials are in the
+shell. Adding one is the first thing a shared environment needs.
+
 `deploy` passes `--require-approval broadening`, so CDK stops whenever a changeset *widens* IAM or
 security-group rules. Every stack asks on its first deploy; after that only one whose diff actually
 adds permission does. Keep it as the default — a permission that widened unnoticed is what the
@@ -156,18 +166,25 @@ What the suites are for beyond the obvious: `infra/` asserts the security proper
 the synthesized template (`aws-cdk-lib/assertions`), and `agent/` + `chatbot-bff/` each assert one
 half of the identity block's wire format, which the two packages cannot share by import.
 
-`AgentStack` is never synthesized in `infra/`'s suite — it builds a real Docker image — and rendered
-React components are not covered, which would need `@testing-library/react` + `jsdom`.
+`AgentStack` is never synthesized in `infra/`'s suite — constructing it builds a real Docker image.
+Its invariants are asserted by reading the source instead, which is how the runtime's absent
+authorizer configuration and its narrow ECR grant stay covered; add to that suite the same way.
+Rendered React components are not covered, which would need `@testing-library/react` + `jsdom`.
 
 ## What this template leaves open
 
-It is scaffolding, not a finished product. Two decisions are deliberately yours:
+It is scaffolding, not a finished product. Three decisions are deliberately yours:
 
 * **Conversation history lives in the container's memory** (`agent/src/index.ts`), keyed by session
   id and evicted after 30 minutes — lost on restart, not shared across replicas. A durable
   deployment swaps in the Strands SDK's `SessionManager` over a persistent store.
 * **There is no data layer.** [infra/README.md](infra/README.md#where-a-data-layer-goes) covers
   where one goes and the two grant rules to follow.
+* **No Bedrock Guardrail is attached to the model.** What the agent will and will not say is the
+  system prompt alone (`agent/src/agent.ts`) — there is no content filter, no PII redaction and no
+  prompt-attack detection, because the right policy is a function of your domain and every rule
+  bills per request. The controls this template *does* ship are operational, not editorial: they
+  bound what a deployment costs and who may reach it, never what comes back.
 
 Before a pilot with real users: set `DEPLOY_PROFILE=pilot` and fix what it refuses, pin
 `DEPLOY_ACCOUNT`/`DEPLOY_REGION`, turn on `WAF_ENABLED`, and decide what your tools may reach.

@@ -589,6 +589,27 @@ describe('the pilot posture is in the template, not only in the README', () => {
   })
 })
 
+describe('the runtime is reachable over SigV4 and nothing else', () => {
+  /**
+   * The property the whole design rests on, and the one every other assertion here assumes: the
+   * runtime carries no `authorizerConfiguration`, so it accepts signed requests alone and the BFF's
+   * role — the only principal granted `InvokeAgentRuntime` — is its only caller.
+   *
+   * Adding a JWT authorizer would give the browser a direct path, and the identity block the agent
+   * trusts is plain text: any signed-in user could then compose one naming another user's `sub`.
+   * Read off the source rather than the synthesized template because constructing `AgentStack`
+   * triggers a real `docker build` — see the note at the top of this file.
+   */
+  it('declares no authorizer configuration on the runtime', () => {
+    const source = readFileSync(new URL('../stacks/agent-stack.ts', import.meta.url), 'utf8')
+
+    // A property assignment, not the comment that explains the absence — hence the line anchor.
+    expect(source).not.toMatch(/^\s*authorizerConfiguration\s*:/m)
+    // The only thing that configuration can carry, in case it ever arrives spread or aliased.
+    expect(source).not.toContain('customJwtAuthorizer')
+  })
+})
+
 describe('the agent may invoke one model, not every model', () => {
   /**
    * `AgentStack` builds a real container image at synth, so it is not constructed here — the ARN
