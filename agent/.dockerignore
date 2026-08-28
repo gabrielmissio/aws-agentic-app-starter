@@ -1,0 +1,22 @@
+# Keeps the Docker build context — and with it the CDK asset hash — a function of the agent's own
+# sources.
+#
+# CDK's DockerImageAsset fingerprints and stages only what survives this file. Without it the
+# context is the whole package (node_modules included), so any `npm install` changes the hash and
+# forces a full image rebuild and push even when no agent source changed.
+
+# Installed inside the image by `npm ci`. Copying the host tree in would also drag the host's
+# architecture into an arm64 image, on top of being reinstalled anyway.
+node_modules
+
+# Produced by `npm run build` inside the image.
+dist
+
+# Runtime configuration comes from the AgentCore runtime environment, never from a file in the image.
+.env
+.env.*
+
+# Not needed to build or run the agent.
+**/__tests__
+*.test.ts
+README.md

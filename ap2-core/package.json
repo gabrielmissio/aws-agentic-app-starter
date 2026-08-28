@@ -1,0 +1,43 @@
+{
+  "name": "ap2-core",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "AP2 core: the pure domain (hash-chained mandates + signing), swappable AWS adapters (KMS/DynamoDB), and the five entity Lambda handlers.",
+  "exports": {
+    "./domain": "./src/domain/index.ts",
+    "./client": "./src/adapters-aws/entity-client.ts",
+    "./aws": "./src/adapters-aws/index.ts",
+    "./log": "./src/log.ts"
+  },
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "seed": "dotenvx run -f ../infra/.env --overload -- tsx src/seed.ts"
+  },
+  "dependencies": {
+    "@aws-crypto/sha256-js": "^5.2.0",
+    "@aws-sdk/client-dynamodb": "^3.1116.0",
+    "@aws-sdk/client-kms": "^3.1116.0",
+    "@aws-sdk/credential-provider-node": "^3.972.81",
+    "@aws-sdk/lib-dynamodb": "^3.1116.0",
+    "@sd-jwt/crypto-nodejs": "^0.19.0",
+    "@sd-jwt/sd-jwt-vc": "^0.20.0",
+    "@sd-jwt/types": "^0.19.0",
+    "@smithy/protocol-http": "^5.6.2",
+    "@smithy/signature-v4": "^5.7.3",
+    "canonicalize": "^4.0.0"
+  },
+  "devDependencies": {
+    "@dotenvx/dotenvx": "^1.61.0",
+    "@types/aws-lambda": "^8.10.149",
+    "@types/node": "^25.6.0",
+    "ajv": "^8.20.0",
+    "tsup": "^8.5.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.10"
+  }
+}

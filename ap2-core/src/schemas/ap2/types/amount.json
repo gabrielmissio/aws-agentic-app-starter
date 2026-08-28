@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ap2:types/amount",
+  "title": "PaymentCurrencyAmount",
+  "description": "W3C Payment Request monetary amount. Source: AP2 ap2.models.payment_request.PaymentCurrencyAmount.",
+  "type": "object",
+  "required": ["currency", "value"],
+  "properties": {
+    "currency": { "type": "string", "description": "ISO-4217 3-letter code." },
+    "value": { "type": "number" }
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ap2:checkout_mandate",
+  "title": "CheckoutMandate",
+  "description": "User-authorized Checkout Mandate. The mandate is a serialized SD-JWT-VC string; this schema validates its DECODED claim set (issuer-JWT payload merged with its disclosures). Source: AP2 checkout_mandate.md \u00a7Closed { vct, checkout_jwt, checkout_hash, iat?, exp? }. checkout_jwt and consent_proof are disclosable; the rest are binding or JOSE claims.",
+  "type": "object",
+  "required": [
+    "vct",
+    "checkout_jwt",
+    "checkout_hash",
+    "iat",
+    "exp"
+  ],
+  "properties": {
+    "vct": {
+      "const": "mandate.checkout.1"
+    },
+    "checkout_jwt": {
+      "type": "string",
+      "description": "The merchant-signed checkout token (disclosable)."
+    },
+    "checkout_hash": {
+      "type": "string",
+      "description": "base64url SHA-256 of checkout_jwt (always visible)."
+    },
+    "iat": {
+      "type": "number"
+    },
+    "exp": {
+      "type": "number"
+    },
+    "iss": {
+      "type": "string"
+    },
+    "aud": {
+      "type": [
+        "string",
+        "array"
+      ]
+    },
+    "jti": {
+      "type": "string"
+    },
+    "nonce": {
+      "type": "string"
+    },
+    "consent_proof": {
+      "type": "object"
+    }
+  }
+}

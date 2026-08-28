@@ -1,0 +1,207 @@
+@import "tailwindcss";
+
+/*
+ * Design system — one blue, one neutral ramp, four status hues.
+ *
+ * Everything visual in this app resolves to a token declared here. Starting a new AP2 project means
+ * editing this block and `src/lib/brand.ts`; no component carries a hard-coded colour, so a rebrand
+ * never turns into a hunt through JSX.
+ */
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-subtle: var(--subtle);
+  --color-primary: var(--primary);
+  --color-primary-dark: var(--primary-dark);
+  --color-primary-light: var(--primary-light);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-border: var(--border);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+:root {
+  /* Brand */
+  --primary: #2563eb;
+  --primary-dark: #1d4ed8;
+  --primary-light: #eff6ff;
+  --primary-foreground: #ffffff;
+
+  /* Neutrals */
+  --background: #f8fafc;
+  --foreground: #0f172a;
+  --card: #ffffff;
+  --card-foreground: #0f172a;
+  --muted: #f1f5f9;
+  /* Secondary copy — dark enough to read a paragraph in. */
+  --muted-foreground: #475569;
+  /* Metadata that should recede one step further, and still clear the contrast floor. */
+  --subtle: #64748b;
+  --border: #e2e8f0;
+
+  /* Status */
+  --success: #059669;
+  --warning: #d97706;
+  --danger: #dc2626;
+
+  /* How much of the viewport the software keyboard covers. Measured and published by
+     trackKeyboardInset(); stays 0 in every browser that resizes the viewport itself. */
+  --keyboard-inset: 0px;
+
+  --shadow-card: 0 1px 2px rgb(15 23 42 / 0.04), 0 1px 3px rgb(15 23 42 / 0.06);
+  --shadow-pop: 0 8px 24px rgb(15 23 42 / 0.10), 0 2px 6px rgb(15 23 42 / 0.06);
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+    box-sizing: border-box;
+  }
+
+  body {
+    background-color: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    min-height: 100dvh;
+    margin: 0;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  h1, h2, h3 {
+    font-weight: 600;
+    letter-spacing: -0.011em;
+  }
+
+  /* One visible focus treatment for the whole app, so no component has to remember to add one. */
+  :focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+  }
+}
+
+/* ── App shell ────────────────────────────────────────────────────────── */
+
+/*
+ * The height of a surface that fills the screen and pins something to its bottom edge.
+ *
+ * `100dvh` alone is wrong the moment a software keyboard opens over the page instead of resizing
+ * it, which is what iOS does — the shell keeps its full height and the composer goes under the
+ * keyboard. See src/lib/viewport.ts for where the inset comes from.
+ */
+@utility h-viewport {
+  height: calc(100dvh - var(--keyboard-inset));
+}
+
+/* ── Chat bubbles ─────────────────────────────────────────────────────── */
+
+/*
+ * The tail.
+ *
+ * A square rotated 45° with half of it tucked behind the bubble: the corner where the two borders
+ * meet ends up pointing outward as a triangle, and the unbordered half is covered by the bubble's
+ * own fill — so the border runs around the tail without a seam, which a CSS triangle built from
+ * `border-width` cannot do at all.
+ *
+ * The numbers are one derivation, not four taste calls. A 10px square has a 14.14px diagonal, so it
+ * reaches 7.07px from its own centre; placing that centre on the bubble's edge is what makes the
+ * outward half a clean triangle and the inward half disappear. `bottom` then follows: 7.07 − 5 − 1
+ * lands the lower vertex exactly on the bubble's bottom border. The corner underneath is squared
+ * off for the same reason — a radius there leaves a visible bite between the curve and the tail.
+ */
+@utility bubble-agent {
+  /* Positioned so an absolutely positioned child of a slot resolves against the bubble rather than
+     against the document — see the note in CheckoutCard. It also anchors the tail. */
+  position: relative;
+  background: var(--card);
+  color: var(--card-foreground);
+  border: 1px solid var(--border);
+  border-radius: 1rem 1rem 1rem 0;
+  padding: 0.75rem 1rem;
+  box-shadow: var(--shadow-card);
+  overflow-wrap: break-word;
+  word-break: break-word;
+
+  &::after {
+    content: '';
+    position: absolute;
+    bottom: 1px;
+    /* Half the square, plus the 1px border, so the centre sits on the border-box edge. */
+    left: -6px;
+    width: 10px;
+    height: 10px;
+    background: var(--card);
+    border-left: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    border-bottom-left-radius: 2px;
+    transform: rotate(45deg);
+  }
+}
+
+@utility bubble-user {
+  position: relative;
+  background: var(--primary);
+  color: var(--primary-foreground);
+  border-radius: 1rem 1rem 0 1rem;
+  padding: 0.75rem 1rem;
+  overflow-wrap: break-word;
+  word-break: break-word;
+
+  &::after {
+    content: '';
+    position: absolute;
+    bottom: 2px;
+    /* One pixel further in than the agent's: with no border to hide it, a centre sitting outside
+       the edge leaves a sliver of background between the tail and the bubble. */
+    right: -4px;
+    width: 10px;
+    height: 10px;
+    background: var(--primary);
+    border-top-right-radius: 2px;
+    transform: rotate(45deg);
+  }
+}
+
+/*
+ * A bubble whose content is a block that brings its own padding — the receipt.
+ *
+ * The bubble keeps the shape and the tail; the block inside drops its frame rather than drawing a
+ * border inside a border.
+ */
+@utility bubble-flush {
+  padding: 0;
+}
+
+/* ── Animations ───────────────────────────────────────────────────────── */
+
+@keyframes bubble-in {
+  0% { opacity: 0; transform: translateY(6px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+@utility animate-bubble-in {
+  animation: bubble-in 0.22s ease-out;
+}
+
+@keyframes thinking-dot {
+  0%, 80%, 100% { transform: scale(0.6); opacity: 0.35; }
+  40% { transform: scale(1); opacity: 1; }
+}
+@utility animate-thinking {
+  animation: thinking-dot 1.4s infinite ease-in-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -1,0 +1,58 @@
+name: CI
+
+# Runs the same checks `npm run verify` (+ `npm run audit`) already run locally before opening a PR
+# — see the root README's "Root scripts" table for what each one does. Nothing here needs AWS
+# credentials or Docker: the infra test suite deliberately excludes AgentStack (it builds a real
+# container image at synth time) from its synth-based assertions for exactly that reason, and this
+# workflow inherits the same boundary — a full `cdk synth`/`cdk deploy` is a separate, credentialed
+# concern, not a PR gate.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Read-only by default, for every job. Without this the `GITHUB_TOKEN` carries whatever the
+# repository's default is — historically write on everything — and a compromised dependency running
+# during `npm ci` inherits it. A job that needs more asks for it, and the ask is reviewable.
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    # A hung install or a test that waits forever costs a runner for six hours by default.
+    timeout-minutes: 20
+    steps:
+      # Actions are pinned to a commit, not a tag. A tag is a mutable pointer the action's owner can
+      # move at any time, so `@v4` means "whatever that repository decides it means today" — which
+      # is a write-access-to-your-CI relationship with every action author. The comment records
+      # which release the SHA was, so the pin is still readable by a human.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # The checkout action otherwise leaves the token in `.git/config` for the rest of the job,
+          # where every later step — including anything `npm ci` executes — can read it.
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            ap2-core/package-lock.json
+            agent/package-lock.json
+            chatbot-bff/package-lock.json
+            chatbot-frontend/package-lock.json
+            infra/package-lock.json
+
+      - name: Install dependencies (root + every subpackage)
+        run: npm run bootstrap
+
+      - name: Lint, typecheck, test
+        run: npm run verify
+
+      # Gates on `high`, not `critical`. A remotely exploitable flaw in a dependency that handles
+      # request bodies is routinely scored high, and a gate that only stops `critical` is a gate that
+      # lets those through while reporting green.
+      - name: Audit
+        run: npm run audit

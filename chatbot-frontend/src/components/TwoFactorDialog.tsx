@@ -1,0 +1,203 @@
+import { useEffect, useState } from 'react'
+import { createPortal } from 'react-dom'
+import {
+  fetchMFAPreference,
+  setUpTOTP,
+  updateMFAPreference,
+  verifyTOTPSetup,
+} from 'aws-amplify/auth'
+import { BRAND } from '@/lib/brand.ts'
+import { useI18n } from '@/lib/i18n/context.ts'
+import { mfaMode, mfaStatus, type MfaStatus } from '@/lib/mfa.ts'
+import { TotpSecret } from './TotpSecret.tsx'
+import { Alert, Button, CARD_CLASS, Field, TextInput } from './ui/index.ts'
+
+/**
+ * Voluntary second-factor enrollment, for the mode that has no other way in.
+ *
+ * Under `required` Cognito enrolls people during sign-in and this panel is only a place to confirm
+ * it happened. Under `optional` it is the *only* path: Cognito challenges users who already have a
+ * factor and never asks anyone to create one, so without somewhere to opt in, `optional` and `off`
+ * are the same deployment. Under `off` the trigger is not rendered at all — see `UserMenu`.
+ *
+ * Disabling is offered only where Cognito would allow it. Removing the last factor from a pool that
+ * mandates one is refused, and a button that always fails is worse than no button.
+ *
+ * Rendered through a portal into `document.body`, which is not a detail. It is opened from the user
+ * menu inside `AppHeader`, and that header sets `backdrop-blur` — `backdrop-filter` makes an element
+ * a containing block for `position: fixed` descendants, so `inset-0` resolved against the header
+ * strip and the dialog appeared centred inside it, clipped. A portal is the fix that survives
+ * whatever the next ancestor adds.
+ */
+export function TwoFactorDialog({ email, onClose }: { email?: string; onClose: () => void }) {
+  const { t } = useI18n()
+  const mode = mfaMode()
+
+  const [status, setStatus] = useState<MfaStatus | null>(null)
+  const [setup, setSetup] = useState<{ sharedSecret: string; setupUri: string } | null>(null)
+  const [code, setCode] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [done, setDone] = useState('')
+
+  const refresh = async () => {
+    setStatus(mfaStatus(mode, await fetchMFAPreference()))
+  }
+
+  useEffect(() => {
+    // Once, when the dialog opens — it is mounted only while open, so unmounting is what resets it.
+    // The panel shows the account's real state rather than an assumption from the mode: under
+    // `optional` two users of the same deployment are legitimately in different states.
+    refresh().catch(() => setError(t('mfa.loadFailed')))
+  }, [])
+
+  const beginEnrollment = async () => {
+    setError('')
+    setBusy(true)
+    try {
+      const details = await setUpTOTP()
+      setSetup({
+        sharedSecret: details.sharedSecret,
+        // Issuer and account both, so someone enrolled in more than one environment can tell the
+        // entries apart in their authenticator's list.
+        setupUri: details.getSetupUri(BRAND.name, email).toString(),
+      })
+      setCode('')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t('mfa.setupFailed'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const confirmEnrollment = async () => {
+    setError('')
+    setBusy(true)
+    try {
+      await verifyTOTPSetup({ code: code.trim() })
+      // Verifying associates the device; it does not switch the factor on. Without this the user
+      // would finish the flow, be told they are protected, and never be challenged again.
+      await updateMFAPreference({ totp: 'PREFERRED' })
+      setSetup(null)
+      setDone(t('mfa.enrolledNow'))
+      await refresh()
+    } catch (err) {
+      // A six-digit code is valid for one window, so a retry always needs an empty field.
+      setCode('')
+      setError(err instanceof Error ? err.message : t('auth.totpFailed'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const disable = async () => {
+    setError('')
+    setBusy(true)
+    try {
+      await updateMFAPreference({ totp: 'DISABLED' })
+      setDone(t('mfa.disabledNow'))
+      await refresh()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t('mfa.disableFailed'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const onSubmit = (e: React.FormEvent) => {
+    e.preventDefault()
+    if (setup) void confirmEnrollment()
+  }
+
+  // Escape closes it, like the menu it opens from.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [onClose])
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/40 p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-label={t('mfa.title')}
+      onClick={onClose}
+    >
+      <div
+        // `my-auto` rather than a centred flex child alone: with the QR code the panel can be taller
+        // than a short viewport, and a centred flex item that overflows is clipped at the top with
+        // no way to scroll to it.
+        className={`${CARD_CLASS} my-auto w-full max-w-sm p-6 shadow-[var(--shadow-pop)]`}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <form onSubmit={onSubmit} className="flex flex-col gap-4">
+          <h2 className="text-base font-semibold text-foreground">{t('mfa.title')}</h2>
+
+          {error && <Alert tone="danger" role="alert">{error}</Alert>}
+          {done && !error && <Alert tone="success">{done}</Alert>}
+
+          {status === null && !error && (
+            <p className="text-sm text-muted-foreground">{t('common.loading')}</p>
+          )}
+
+          {setup ? (
+            <>
+              <p className="text-sm text-muted-foreground">{t('auth.totpSetupPrompt')}</p>
+              <TotpSecret sharedSecret={setup.sharedSecret} setupUri={setup.setupUri} />
+              <Field label={t('auth.totpCodeLabel')} htmlFor="mfa-code">
+                <TextInput
+                  id="mfa-code"
+                  type="text"
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  value={code}
+                  onChange={(e) => setCode(e.target.value)}
+                  className="text-center text-lg tracking-[0.3em]"
+                  placeholder="123456"
+                  required
+                  autoFocus
+                />
+              </Field>
+              <Button type="submit" disabled={busy}>
+                {busy ? t('common.loading') : t('auth.submitTotpSetup')}
+              </Button>
+            </>
+          ) : (
+            status?.kind === 'enrolled' && (
+              <>
+                <p className="text-sm text-muted-foreground">{t('mfa.enrolled')}</p>
+                {status.canDisable ? (
+                  <Button type="button" variant="danger" onClick={() => void disable()} disabled={busy}>
+                    {t('mfa.disable')}
+                  </Button>
+                ) : (
+                  // Not a missing feature: the pool mandates a factor, so Cognito would refuse.
+                  <p className="text-xs text-muted-foreground">{t('mfa.requiredHint')}</p>
+                )}
+              </>
+            )
+          )}
+
+          {!setup && status?.kind === 'notEnrolled' && (
+            <>
+              <p className="text-sm text-muted-foreground">
+                {status.enforced ? t('mfa.enforcedPrompt') : t('mfa.optionalPrompt')}
+              </p>
+              <Button type="button" onClick={() => void beginEnrollment()} disabled={busy}>
+                {busy ? t('common.loading') : t('mfa.enroll')}
+              </Button>
+            </>
+          )}
+
+          <Button type="button" variant="ghost" onClick={onClose}>
+            {t('mfa.close')}
+          </Button>
+        </form>
+      </div>
+    </div>,
+    document.body,
+  )
+}

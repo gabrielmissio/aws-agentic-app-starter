@@ -1,0 +1,7 @@
+.env
+dist/
+temp/
+.kiro/
+cdk.out/
+.aws-sam/
+node_modules/
