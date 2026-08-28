@@ -1,20 +1,13 @@
 /**
  * Keeping a full-screen surface above the software keyboard.
  *
- * `100dvh` answers "how tall is the viewport once the browser's own chrome is accounted for" — and
- * on iOS the software keyboard is not browser chrome. It slides over the page without resizing the
- * layout viewport, so a `100dvh` shell keeps its full height and the composer pinned to its bottom
- * edge ends up underneath the keyboard. Safari compensates by panning the layout viewport, which
- * drags the sticky header off the top of the screen and can leave the page offset afterwards.
+ * On iOS the keyboard is not browser chrome: it slides over the page without resizing the layout
+ * viewport, so a `100dvh` shell keeps its full height and its pinned composer ends up underneath.
+ * The gap between `visualViewport.height` and `window.innerHeight` is the keyboard; it is published
+ * as `--keyboard-inset` and subtracted by `h-viewport` in styles.css.
  *
- * `visualViewport` is the part of the page actually on screen, so the gap between it and
- * `window.innerHeight` is the keyboard. We publish that gap as `--keyboard-inset` and the shell
- * subtracts it — see `h-viewport` in styles.css.
- *
- * Chrome on Android does this natively given `interactive-widget=resizes-content` in the viewport
- * meta tag (index.html): there the layout viewport shrinks along with the visual one, both heights
- * fall together, and the inset measured here stays 0. Safari ignores the key, which is why the
- * measurement exists at all.
+ * Chrome on Android handles this natively via `interactive-widget=resizes-content` (index.html) and
+ * the inset stays 0. Safari ignores that key, which is why the measurement exists at all.
  */
 
 /** Below this, the gap is browser chrome mid-collapse or rounding — no keyboard is that short. */
@@ -38,19 +31,14 @@ export function isZoomed(scale: number): boolean {
 }
 
 /**
- * How much of the viewport the software keyboard covers, in CSS pixels — 0 when none is open.
+ * How much of the viewport the keyboard covers, in CSS pixels — 0 when none is open.
  *
- * Deliberately blind to `visualViewport.offsetTop`. Subtracting the pan as well would measure "how
- * much of the layout viewport falls below the screen right now", which is a moving target: shrinking
- * the shell removes the reason Safari panned, the pan unwinds, and the next measurement disagrees
- * with the one that caused it. The gap between the two heights is the keyboard whether the page has
- * been panned or not.
- *
- * Pure, so the awkward cases are testable without a browser.
+ * Deliberately blind to `visualViewport.offsetTop`: subtracting Safari's pan makes this a moving
+ * target, since shrinking the shell removes the reason it panned and the next measurement disagrees
+ * with the one that caused it. The gap between the two heights is the keyboard either way.
  */
 export function keyboardInset({ innerHeight, visualHeight, scale }: ViewportMetrics): number {
-  // Resizing the shell mid-gesture would fight the user, and a zoomed visual viewport is smaller
-  // for a reason that has nothing to do with a keyboard.
+  // A zoomed visual viewport is smaller for a reason that has nothing to do with a keyboard.
   if (isZoomed(scale)) return 0
 
   const covered = innerHeight - visualHeight
@@ -58,10 +46,8 @@ export function keyboardInset({ innerHeight, visualHeight, scale }: ViewportMetr
 }
 
 /**
- * Publishes `--keyboard-inset` on the document element and keeps it current. Returns a teardown.
- *
- * A no-op where `visualViewport` is missing: the variable keeps the 0 it is declared with in
- * styles.css, and every shell stays a plain `100dvh`.
+ * Publishes `--keyboard-inset` and keeps it current. A no-op without `visualViewport`: the variable
+ * keeps the 0 styles.css declares, and every shell stays a plain `100dvh`.
  */
 export function trackKeyboardInset(): () => void {
   const viewport = window.visualViewport
@@ -76,8 +62,7 @@ export function trackKeyboardInset(): () => void {
     document.documentElement.style.setProperty('--keyboard-inset', `${inset}px`)
   }
 
-  // `scroll` as well as `resize`: iOS pans the visual viewport while the keyboard animates in, and
-  // fires nothing but `scroll` for part of that. Both handlers do the same idempotent read.
+  // `scroll` too: iOS fires only that for part of the keyboard animation. Both reads are idempotent.
   viewport.addEventListener('resize', sync)
   viewport.addEventListener('scroll', sync)
   sync()

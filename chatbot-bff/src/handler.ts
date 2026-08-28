@@ -5,8 +5,7 @@ import { invokeAgentStream } from './agent-client.js'
 import { formatSseEvent, jsonHeaders, sseHeaders, validateMessage } from './http.js'
 import { checkRateLimit, resolveRateLimitConfig } from './rate-limit.js'
 import { resolveSessionId } from './session.js'
-import { withSessionContext } from './ap2/session-context.js'
-import { mintCallerToken } from './ap2/identity.js'
+import { withSessionContext } from './session-context.js'
 
 const AGENT_RUNTIME_ARN = process.env.AGENT_RUNTIME_ARN ?? ''
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN ?? '*'
@@ -116,21 +115,15 @@ export const handler = awslambda.streamifyResponse(
       writeSseEvent(responseStream, 'session', { sessionId })
 
       // The agent is told who is asking, from claims the gateway authorizer verified — never from
-      // anything the client sent. Its payment tools read that identity from the request scope, so
-      // none of them has to accept a user id the model could be persuaded to change. See
-      // `ap2/session-context.ts` for the contract this shares with the agent's parser.
-      // The signed half of that identity. The agent forwards it verbatim to the AP2 entities, which
-      // verify it against the BFF's KMS key — so what an entity believes about the caller comes from
-      // a signature, not from a line of text the agent could have rewritten.
-      const identityToken = await mintCallerToken(userId)
-
+      // anything the client sent. Its tools read that identity from the request scope, so none of
+      // them has to accept a user id the model could be persuaded to change. See
+      // `session-context.ts` for the contract this shares with the agent's parser.
       const stream = await invokeAgentStream({
         message: withSessionContext(
           {
             userId,
             ...(claims?.email ? { email: claims.email } : {}),
             ...(claims?.name ? { displayName: claims.name } : {}),
-            identityToken,
           },
           message,
         ),

@@ -14,22 +14,11 @@ export type ErrorCode =
   | 'invalidRole'
   | 'invalidLocale'
   | 'emailAlreadyExists'
+  | 'unauthenticated'
   | 'forbidden'
   | 'notFound'
-  | 'internal'
-  // ── AP2 checkout ──────────────────────────────────────────────────────
-  | 'unauthenticated'
-  | 'consentSessionNotFound'
-  | 'intentNotFound'
-  | 'intentExpired'
-  | 'intentResolved'
-  | 'intentTampered'
-  | 'otpRequired'
-  | 'otpInvalid'
-  | 'otpAttemptsExhausted'
-  | 'stepUpUnavailable'
   | 'tooManyRequests'
-  | 'checkoutBlocked'
+  | 'internal'
 
 export const ERROR_MESSAGES: Record<ErrorCode, string> = {
   invalidBody: 'The request body is malformed',
@@ -37,37 +26,18 @@ export const ERROR_MESSAGES: Record<ErrorCode, string> = {
   invalidRole: '"role" must be "admin" or "user"',
   invalidLocale: '"locale" is not a supported language',
   emailAlreadyExists: 'That email already has an account',
+  unauthenticated: 'Sign in to continue',
   forbidden: 'Admin group membership required',
   notFound: 'Not found',
+  tooManyRequests: 'Too many requests, try again shortly',
   internal: 'Internal server error',
-  unauthenticated: 'Sign in to continue',
-  consentSessionNotFound: 'That checkout is no longer available',
-  intentNotFound: 'That checkout is no longer available',
-  intentExpired: 'The approval window has closed',
-  intentResolved: 'That checkout has already been decided',
-  intentTampered: 'The approval could not be verified',
-  otpRequired: 'A one-time code is required',
-  otpInvalid: 'That code is not correct',
-  otpAttemptsExhausted: 'Too many incorrect codes — start the checkout again',
-  stepUpUnavailable: 'This checkout needs a one-time code, and this deployment cannot send one',
-  tooManyRequests: 'Too many checkout requests, try again shortly',
-  checkoutBlocked: 'The payment chain refused this checkout',
 }
 
 export interface ErrorBody {
   code: ErrorCode
   error: string
-  /**
-   * The AP2 accountability code, when the chain itself refused the checkout (`TAMPERED`, `EXPIRED`,
-   * `DOUBLE_SPEND`, `OUT_OF_SCOPE`, …).
-   *
-   * Carried alongside the client-facing code rather than folded into it: the frontend localizes
-   * `code`, while this is the protocol's own vocabulary, which the Explorer shows verbatim because
-   * translating it would make the audit trail harder to compare against the spec, not easier.
-   */
-  ap2Code?: string
 }
 
-export function errorBody(code: ErrorCode, ap2Code?: string): ErrorBody {
-  return { code, error: ERROR_MESSAGES[code], ...(ap2Code ? { ap2Code } : {}) }
+export function errorBody(code: ErrorCode): ErrorBody {
+  return { code, error: ERROR_MESSAGES[code] }
 }

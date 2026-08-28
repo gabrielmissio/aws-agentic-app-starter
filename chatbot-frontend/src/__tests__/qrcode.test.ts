@@ -12,7 +12,7 @@ import qrcode from 'qrcode-generator'
  */
 
 const OTPAUTH_URI =
-  'otpauth://totp/TastyGo:user@example.com?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP&issuer=TastyGo&algorithm=SHA1&digits=6&period=30'
+  'otpauth://totp/Aria:user@example.com?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP&issuer=Aria&algorithm=SHA1&digits=6&period=30'
 
 describe('encoding an enrollment URI', () => {
   it('produces a square grid with dark modules in it', () => {

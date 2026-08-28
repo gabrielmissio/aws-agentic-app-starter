@@ -1,9 +1,7 @@
 /**
- * The i18n engine — pure, dependency-free, and free of React.
- *
- * Everything formatting-related delegates to the platform's `Intl`, so plurals follow CLDR rules for
- * every locale without shipping a rules table. What is left is small enough to keep here: a fallback
- * chain, placeholder interpolation, and plural category selection.
+ * The i18n engine — pure, dependency-free, React-free. Formatting delegates to `Intl`, so plurals
+ * follow CLDR without shipping a rules table; what is left is a fallback chain, interpolation and
+ * plural selection.
  */
 
 /** Locales the app ships copy for. The first entry is the base and must be complete. */
@@ -29,10 +27,8 @@ export type Catalog = Record<string, MessageValue>
 export type Vars = Record<string, string | number>
 
 /**
- * Narrows an arbitrary language tag onto a supported locale.
- *
- * Matches exactly first, then by primary subtag, so a browser reporting `pt`, `pt-PT` or `en-GB`
- * still lands on the closest catalog we ship instead of falling through past it to English.
+ * Narrows a language tag onto a supported locale: exact match first, then primary subtag, so `pt`,
+ * `pt-PT` and `en-GB` land on the closest catalog rather than falling through to English.
  */
 export function resolveLocale(
   candidates: readonly (string | undefined | null)[],
@@ -76,10 +72,8 @@ export function selectPlural(forms: PluralForms, locale: Locale, count: number):
 }
 
 /**
- * Resolves one key against a locale, then the base locale.
- *
- * Returns the key itself when nothing matches. That is deliberate: a visible `admin.inviteTitle` in
- * the UI is a bug report, whereas an empty string looks like an intentionally blank label.
+ * Resolves a key against a locale, then the base. Returns the key itself when nothing matches: a
+ * visible `admin.inviteTitle` is a bug report, an empty string looks like a blank label.
  */
 export function translate(
   catalogs: Partial<Record<Locale, Catalog>>,

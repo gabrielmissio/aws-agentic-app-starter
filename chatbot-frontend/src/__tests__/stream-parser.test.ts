@@ -119,8 +119,8 @@ describe('parseAgentCoreStream', () => {
 
   it('completes once when the turn ends with both a stop event and a result event', async () => {
     // Strands sends both: the model stopped, and the agent produced its result. Consumers act on
-    // completion — the chat opens the checkout gate there — and the gate mints a fresh one-time
-    // code each time it is opened, so a second signal invalidates the code already on screen.
+    // completion — screens hang end-of-turn work off it — so a second signal would do that work
+    // twice for a single turn.
     const h = makeCallbacks()
 
     await parseAgentCoreStream(

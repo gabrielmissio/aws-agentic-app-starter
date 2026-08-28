@@ -1,17 +1,12 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 
 /**
- * The authenticated caller for the request currently being served.
- *
- * The AP2 tools read the user from here, not from a tool parameter: an identity the model can pass
- * is one it can be talked into changing, and "look up the payment methods for user X" does nothing
- * if no tool accepts a user id. The BFF produces the block from claims the API Gateway authorizer
- * verified; it arrives atop the prompt and is parsed off here.
+ * The authenticated caller for the request being served — the extension point a tool uses instead of
+ * taking a user id, since an identity the model can pass is one it can be talked into changing.
  *
  * What makes that safe is the transport, not this parser. The block is plain text, so it is only as
  * trustworthy as whoever could write it — and the runtime accepts SigV4 alone, with only the BFF's
- * role granted `InvokeAgentRuntime` (`infra/src/stacks/agent-stack.ts`). Any browser-speakable
- * transport would make the block a request body any signed-in user could compose.
+ * role granted `InvokeAgentRuntime` (`infra/src/stacks/agent-stack.ts`).
  *
  * `AsyncLocalStorage`, not a module-level variable: a warm container serves concurrent invocations,
  * and a shared variable would leak one caller's identity into another's tool call.
@@ -20,17 +15,6 @@ export interface Caller {
   userId: string
   email?: string
   displayName?: string
-  /**
-   * The BFF-signed identity token for this caller, forwarded verbatim on every entity call.
-   *
-   * The `userId` above is for the agent's own bookkeeping and logging. It is **not** what the
-   * entities believe: they verify this token against the BFF's KMS key and read the subject out of
-   * it, so the agent cannot assert an identity even by editing its own copy.
-   *
-   * It never reaches the model. The block this arrives in is stripped off in `src/index.ts` before
-   * the prompt is handed to the agent, so no injected instruction can ask for it to be read out.
-   */
-  identityToken?: string
 }
 
 const store = new AsyncLocalStorage<Caller>()
@@ -52,10 +36,10 @@ const MESSAGE_HEADER = '[User message]'
 /**
  * Splits a BFF-injected prompt into the verified identity and the user's own text.
  *
- * A prompt with no context block yields no caller, and the AP2 tools then decline. In a correctly
- * deployed stack that never happens — every invocation comes from the BFF, which always prepends
- * one — so reaching it means the runtime was invoked by something else holding IAM credentials, and
- * declining is the only sound response.
+ * A prompt with no context block yields no caller, and a tool that acts for a person then declines.
+ * In a correctly deployed stack that never happens — every invocation comes from the BFF, which
+ * always prepends one — so reaching it means the runtime was invoked by something else holding IAM
+ * credentials, and declining is the only sound response.
  *
  * Only the *first* block is honored, and only at the very start of the prompt. A user who types the
  * header into their own message cannot introduce a second identity, because everything after
@@ -83,7 +67,6 @@ export function parsePrompt(raw: string): { caller?: Caller; message: string } {
       userId,
       ...(field('email') ? { email: field('email') } : {}),
       ...(field('displayName') ? { displayName: field('displayName') } : {}),
-      ...(field('identityToken') ? { identityToken: field('identityToken') } : {}),
     },
     message,
   }
@@ -96,7 +79,6 @@ export function formatSessionContext(caller: Caller): string {
     `userId: ${caller.userId}`,
     ...(caller.email ? [`email: ${caller.email}`] : []),
     ...(caller.displayName ? [`displayName: ${caller.displayName}`] : []),
-    ...(caller.identityToken ? [`identityToken: ${caller.identityToken}`] : []),
     '',
     MESSAGE_HEADER,
     '',

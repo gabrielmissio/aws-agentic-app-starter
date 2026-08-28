@@ -8,9 +8,9 @@ import { Construct } from 'constructs'
 import type { MfaMode } from '../config.js'
 
 /**
- * Where the app's public URL is published for other stacks to read at runtime (not at synth time —
- * see the note by `AppUrlParameter` below). A plain string function, not a construct: importing it
- * elsewhere creates no CDK cross-stack reference, just agreement on a parameter name.
+ * Where the app's public URL is published for other stacks to read at *runtime*. A plain string
+ * function, not a construct: importing it elsewhere creates no cross-stack reference, only
+ * agreement on a parameter name — see `AppUrlParameter` below.
  */
 export function appUrlParameterName(projectName: string): string {
   return `/${projectName}/app-url`
@@ -18,10 +18,7 @@ export function appUrlParameterName(projectName: string): string {
 
 export interface FrontendStackProps extends cdk.StackProps {
   projectName: string
-  /**
-   * The BFF API base URL — injected into the runtime config so the SPA
-   * knows where to POST /chat requests.
-   */
+  /** The BFF API base URL, injected into the runtime config the SPA reads. */
   bffUrl: string
   // Cognito values written into a runtime config object served from S3
   cognitoUserPoolId: string
@@ -30,17 +27,11 @@ export interface FrontendStackProps extends cdk.StackProps {
   /** Mirrors AuthStackProps.publicSignUpEnabled — tells the SPA which auth screen to render. */
   publicSignUpEnabled: boolean
   /**
-   * Mirrors `AuthStackProps.mfa`. The SPA needs it because the three modes are three different
-   * products: `off` has no enrollment at all, `required` enrolls at sign-in, and `optional` is the
-   * only one where a signed-in user has to be *offered* a second factor — without knowing which,
-   * the app would either hide a control people need or show one Cognito refuses.
+   * Mirrors `AuthStackProps.mfa`. The SPA needs it because the modes are three different products:
+   * `off` has no enrollment, `required` enrolls at sign-in, and only `optional` has to *offer* one.
    */
   mfa?: MfaMode
-  /**
-   * Mirrors AuthStackProps.retainData. The bucket only holds a rebuildable static build, so this is
-   * mostly about not orphaning it on every disposable-environment teardown — unlike the user pool,
-   * losing it costs nothing but a redeploy.
-   */
+  /** Mirrors `AuthStackProps.retainData`. The bucket holds a rebuildable build; losing it costs a redeploy. */
   retainData?: boolean
 }
 
@@ -64,34 +55,26 @@ export class FrontendStack extends cdk.Stack {
     // ── S3 bucket (private — no public access) ─────────────────────────
     const siteBucket = new s3.Bucket(this, 'SiteBucket', {
       bucketName: `${projectName}-frontend-${this.account}`,
-      // No `blockPublicAccess`: S3 blocks public access by default on new buckets, and setting it
-      // explicitly needs `s3:PutBucketPublicAccessBlock`, which some SCPs deny. Add
-      // `blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL` if your account allows the call and you
-      // want the setting pinned rather than inherited.
+      // No `blockPublicAccess`: S3 blocks public access by default, and setting it explicitly needs
+      // `s3:PutBucketPublicAccessBlock`, which some SCPs deny. Add it if you want it pinned.
       encryption: s3.BucketEncryption.S3_MANAGED,
       removalPolicy: retainData ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
-      // Only safe alongside DESTROY: emptying a bucket you are about to retain would just leave an
-      // empty one behind, defeating the point.
+      // Only safe alongside DESTROY — emptying a bucket you then retain leaves an empty one.
       autoDeleteObjects: !retainData,
     })
 
-    // ── CloudFront Origin Access Control ──────────────────────────────
     const oac = new cloudfront.S3OriginAccessControl(this, 'OAC', {
       signing: cloudfront.Signing.SIGV4_NO_OVERRIDE,
     })
 
     // ── Security response headers ───────────────────────────────────────
-    // The SPA keeps its Cognito tokens in localStorage (aws-amplify's default, see
-    // chatbot-frontend/src/lib/auth.ts). httpOnly cookies would need the tokens brokered
-    // server-side; a strict CSP instead closes the injection point that would read them —
-    // `script-src 'self'` with no `'unsafe-inline'`/`'unsafe-eval'` blocks the injected-script class
-    // of attack outright.
+    // The SPA keeps its Cognito tokens in localStorage (Amplify's default), so the CSP closes the
+    // injection point that would read them: `script-src 'self'` with no `'unsafe-inline'`.
     //
-    // `style-src` needs `'unsafe-inline'` because several components set React inline `style={{...}}`,
-    // which CSP treats like a `<style>` tag. `connect-src` allows only API Gateway and Cognito — the
-    // AgentCore host is absent because the browser has no transport to the runtime, and listing it
-    // would only widen the exfiltration surface. The `execute-api` wildcard is there because the
-    // BFF's exact origin is a cross-stack CDK token here, not a plain string.
+    // `style-src` needs `'unsafe-inline'` for React inline `style={{...}}`, which CSP treats like a
+    // `<style>` tag. `connect-src` lists API Gateway and Cognito only — the AgentCore host is absent
+    // because the browser has no transport to it, and listing it would widen exfiltration. The
+    // `execute-api` wildcard is there because the BFF's origin is a cross-stack token here.
     const securityHeadersPolicy = new cloudfront.ResponseHeadersPolicy(this, 'SecurityHeaders', {
       responseHeadersPolicyName: `${projectName}-security-headers`,
       comment: 'CSP + standard hardening headers for the chatbot SPA',
@@ -143,7 +126,7 @@ export class FrontendStack extends cdk.Stack {
         responseHeadersPolicy: securityHeadersPolicy,
         compress: true,
       },
-      // SPA fallback — return index.html for all 403/404 so React Router works
+      // SPA fallback: index.html for 403/404, so a deep link resolves client-side.
       errorResponses: [
         {
           httpStatus: 403,
@@ -164,10 +147,8 @@ export class FrontendStack extends cdk.Stack {
     this.distributionUrl = `https://${distribution.distributionDomainName}`
 
     // ── Runtime config object ─────────────────────────────────────────
-    // Deployed as /config.js — the HTML loads this before the bundle,
-    // so the SPA can read window.__APP_CONFIG__ without a rebuild.
-    // This is the standard pattern for injecting env vars into static SPAs
-    // without baking them into the Vite bundle at build time.
+    // Deployed as /config.js and loaded before the bundle, so the SPA reads `window.__APP_CONFIG__`
+    // without these values being baked into the Vite build.
     const configContent = `window.__APP_CONFIG__ = ${JSON.stringify({
       VITE_API_URL: bffUrl.replace(/\/$/, ''),
       VITE_AWS_REGION: cognitoRegion,
@@ -178,20 +159,13 @@ export class FrontendStack extends cdk.Stack {
     })};`
 
     // ── Deploy pre-built frontend assets ──────────────────────────────
-    // Expects `chatbot-frontend` to be built before `cdk deploy` runs.
-    // Add `npm run build` in chatbot-frontend/ to your CI pipeline first.
-    //
-    // Two deployments, because the two kinds of file need opposite cache headers and a single
-    // `BucketDeployment` carries one `cacheControl`, so this is split in two. Stamping
-    // `immutable, max-age=31536000` on index.html would be a real bug: it names the content-hashed
-    // bundles, so a browser told to keep it for a year goes on requesting bundle names from a build
-    // that no longer exists — and a CloudFront invalidation cannot help, because the stale copy is
-    // in the browser's own cache.
-    //
-    // `prune: false` on both: two deployments into one bucket would each delete the other's files.
+    // Expects `chatbot-frontend` to be built first. Two deployments, because the two kinds of file
+    // need opposite cache headers and one `BucketDeployment` carries one `cacheControl`. Caching
+    // index.html forever would be a real bug: it names the hashed bundles, so a browser keeping it
+    // for a year requests names from a build that no longer exists — and an invalidation cannot
+    // reach the browser's own cache. `prune: false` on both, or each would delete the other's files.
 
-    // Content-hashed by Vite, so the filename changes whenever the bytes do. Safe to cache forever;
-    // `immutable` is what stops the browser revalidating them on every reload.
+    // Content-hashed by Vite: the name changes with the bytes, so `immutable` is safe.
     const assets = new s3deploy.BucketDeployment(this, 'DeployAssets', {
       sources: [s3deploy.Source.asset('../chatbot-frontend/dist', { exclude: ['index.html'] })],
       destinationBucket: siteBucket,
@@ -200,9 +174,8 @@ export class FrontendStack extends cdk.Stack {
       cacheControl: [s3deploy.CacheControl.fromString('public, max-age=31536000, immutable')],
     })
 
-    // The two files whose names never change, and which name everything else. `no-cache` does not
-    // mean "do not store" — it means the browser must revalidate before reusing it, so a deploy is
-    // picked up on the next navigation.
+    // The two files whose names never change. `no-cache` means revalidate, not "do not store", so
+    // a deploy is picked up on the next navigation.
     const entrypoint = new s3deploy.BucketDeployment(this, 'DeployEntrypoint', {
       sources: [
         s3deploy.Source.asset('../chatbot-frontend/dist', { exclude: ['*', '!index.html'] }),
@@ -210,8 +183,7 @@ export class FrontendStack extends cdk.Stack {
       ],
       destinationBucket: siteBucket,
       distribution,
-      // Only these need invalidating — a hashed asset is never stale, it is either present or it is
-      // a new name.
+      // Only these: a hashed asset is never stale, it is either present or it is a new name.
       distributionPaths: ['/', '/index.html', '/config.js'],
       memoryLimit: 256,
       prune: false,
@@ -236,9 +208,8 @@ export class FrontendStack extends cdk.Stack {
     )
 
     // ── Published for the invite & verification emails ─────────────────
-    // The Cognito CustomMessage trigger needs this URL, but it lives in the auth stack, which the
-    // frontend stack depends on — so it cannot be handed over as a synth-time reference without a
-    // cycle. SSM breaks it: the frontend writes here, the trigger reads at send time.
+    // The CustomMessage trigger needs this URL but lives in the auth stack, which this one depends
+    // on — a synth-time reference would be a cycle. SSM breaks it: written here, read at send time.
     new ssm.StringParameter(this, 'AppUrlParameter', {
       parameterName: appUrlParameterName(projectName),
       stringValue: this.distributionUrl,

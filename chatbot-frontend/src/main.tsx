@@ -1,6 +1,5 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
-import { BrowserRouter } from 'react-router-dom'
 import { App } from './App.tsx'
 import { I18nProvider } from './lib/i18n/index.tsx'
 import { configureAuth } from './lib/auth.ts'
@@ -18,12 +17,7 @@ if (root) {
   createRoot(root).render(
     <StrictMode>
       <I18nProvider>
-        {/* Real paths rather than hashes: CloudFront already serves index.html for any unmatched
-            route (see the SPA fallback in infra/src/stacks/frontend-stack.ts), so a deep link to a
-            checkout's proof works when it is pasted or bookmarked. */}
-        <BrowserRouter>
-          <App />
-        </BrowserRouter>
+        <App />
       </I18nProvider>
     </StrictMode>,
   )

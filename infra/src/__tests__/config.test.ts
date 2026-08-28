@@ -14,39 +14,12 @@ import {
   resolveAlertEmail,
   resolveAllowedOrigin,
   resolveApiThrottle,
-  resolveAp2RateLimit,
-  DEFAULT_AP2_RATE_LIMIT,
   resolveMonthlyBudgetUsd,
   resolvePublicSignUpEnabled,
   resolveRetainData,
   resolveUserRateLimit,
   DEFAULT_USER_RATE_LIMIT,
-  DEFAULT_INTENT_TTL_MINUTES,
-  DEFAULT_OTP_STEPUP_THRESHOLD_CENTS,
-  DEFAULT_TARGET_MPP,
-  resolveAllowedMpps,
-  resolveAutoProvisionSandboxMethod,
-  resolveIntentTtlMinutes,
-  resolveOtpRevealInUi,
-  resolveOtpStepUpThresholdCents,
 } from '../config.js'
-
-describe('resolveAp2RateLimit', () => {
-  it('defaults tighter than the chat quota — these are the routes that move money', () => {
-    expect(resolveAp2RateLimit()).toEqual(DEFAULT_AP2_RATE_LIMIT)
-    expect(DEFAULT_AP2_RATE_LIMIT.limit).toBeLessThan(DEFAULT_USER_RATE_LIMIT.limit)
-  })
-
-  it('accepts an override', () => {
-    expect(resolveAp2RateLimit('4', '30')).toEqual({ limit: 4, windowSeconds: 30 })
-  })
-
-  it('fails loudly at synth time rather than silently widening the quota', () => {
-    expect(() => resolveAp2RateLimit('0')).toThrow(/AP2_RATE_LIMIT/)
-    expect(() => resolveAp2RateLimit('lots')).toThrow(/AP2_RATE_LIMIT/)
-    expect(() => resolveAp2RateLimit('10', '-1')).toThrow(/AP2_RATE_LIMIT_WINDOW_SECONDS/)
-  })
-})
 
 describe('resolveAgentImagePlatform', () => {
   it('defaults to arm64 — the AgentCore runtime target', () => {
@@ -205,101 +178,21 @@ describe('resolveApiThrottle', () => {
   })
 })
 
-describe('resolveAllowedMpps', () => {
-  it('defaults to the sandbox MPP when unset or blank', () => {
-    expect(resolveAllowedMpps(undefined)).toEqual([DEFAULT_TARGET_MPP])
-    expect(resolveAllowedMpps('   ')).toEqual([DEFAULT_TARGET_MPP])
-  })
-
-  it('splits and trims a comma-separated list', () => {
-    expect(resolveAllowedMpps('mpp-a, mpp-b ,mpp-c')).toEqual(['mpp-a', 'mpp-b', 'mpp-c'])
-  })
-
-  it('drops blank entries so a stray comma cannot authorize an empty MPP id', () => {
-    expect(resolveAllowedMpps('mpp-a,,mpp-b,')).toEqual(['mpp-a', 'mpp-b'])
-    expect(resolveAllowedMpps(',')).toEqual([DEFAULT_TARGET_MPP])
-  })
-})
-
-describe('resolveAutoProvisionSandboxMethod', () => {
-  it('defaults to on, so a brand-new account can reach checkout', () => {
-    expect(resolveAutoProvisionSandboxMethod(undefined)).toBe(true)
-  })
-
-  it('accepts the usual spellings, case-insensitively', () => {
-    expect(resolveAutoProvisionSandboxMethod('FALSE')).toBe(false)
-    expect(resolveAutoProvisionSandboxMethod('off')).toBe(false)
-    expect(resolveAutoProvisionSandboxMethod('1')).toBe(true)
-  })
-
-  it('fails loudly on an unrecognized value instead of silently defaulting', () => {
-    expect(() => resolveAutoProvisionSandboxMethod('maybe')).toThrow(
-      /Unsupported AUTO_PROVISION_SANDBOX_METHOD/,
-    )
-  })
-})
-
-describe('resolveOtpStepUpThresholdCents', () => {
-  it('defaults to R$100.00 in minor units', () => {
-    expect(resolveOtpStepUpThresholdCents(undefined)).toBe(DEFAULT_OTP_STEPUP_THRESHOLD_CENTS)
-    expect(DEFAULT_OTP_STEPUP_THRESHOLD_CENTS).toBe(10_000)
-  })
-
-  it('accepts zero, which means every payment steps up', () => {
-    expect(resolveOtpStepUpThresholdCents('0')).toBe(0)
-  })
-
-  it('rejects a non-integer or negative threshold rather than guessing', () => {
-    // Silently falling back here would make every payment frictionless, which is precisely the
-    // failure nobody notices until it matters.
-    expect(() => resolveOtpStepUpThresholdCents('50.5')).toThrow(/OTP_STEPUP_THRESHOLD_CENTS/)
-    expect(() => resolveOtpStepUpThresholdCents('-1')).toThrow(/OTP_STEPUP_THRESHOLD_CENTS/)
-    expect(() => resolveOtpStepUpThresholdCents('lots')).toThrow(/OTP_STEPUP_THRESHOLD_CENTS/)
-  })
-})
-
-describe('resolveIntentTtlMinutes', () => {
-  it('defaults to five minutes', () => {
-    expect(resolveIntentTtlMinutes(undefined)).toBe(DEFAULT_INTENT_TTL_MINUTES)
-  })
-
-  it('rejects a non-positive or unparseable window', () => {
-    expect(() => resolveIntentTtlMinutes('0')).toThrow(/INTENT_TTL_MIN/)
-    expect(() => resolveIntentTtlMinutes('-5')).toThrow(/INTENT_TTL_MIN/)
-    expect(() => resolveIntentTtlMinutes('soon')).toThrow(/INTENT_TTL_MIN/)
-  })
-})
-
-describe('resolveOtpRevealInUi', () => {
-  it('defaults to off — the code is never handed back in a response by accident', () => {
-    expect(resolveOtpRevealInUi(undefined)).toBe(false)
-    expect(resolveOtpRevealInUi('')).toBe(false)
-  })
-
-  it('is enabled only by an explicit affirmative value', () => {
-    expect(resolveOtpRevealInUi('true')).toBe(true)
-    expect(resolveOtpRevealInUi('no')).toBe(false)
-    expect(() => resolveOtpRevealInUi('sandbox')).toThrow(/Unsupported OTP_REVEAL_IN_UI/)
-  })
-})
-
 describe('the deployment profile gate', () => {
   /**
-   * The template ships sandbox defaults on purpose — public sign-up, a code echoed back in the
-   * response, CORS open to everything — each documented as sandbox-only. Documentation is the
-   * control that fails here: whoever copies this repo to run a pilot is not whoever read the
-   * comment. These tests pin the mechanism that turns those notes into a build failure.
+   * The template ships sandbox defaults on purpose — public sign-up, CORS open to everything, no
+   * second factor — each documented as sandbox-only. Documentation is the control that fails here:
+   * whoever copies this repo to run a pilot is not whoever read the comment. These tests pin the
+   * mechanism that turns those notes into a build failure.
    */
   const pilot = () => ({
     profile: 'pilot' as const,
     publicSignUpEnabled: false,
-    otpRevealInUi: false,
     allowedOrigin: 'https://app.example.com',
     alertEmail: 'ops@example.com',
     mfa: 'required' as const,
     threatProtection: 'audit' as const,
     retainData: true,
-    autoProvisionSandboxMethod: true,
   })
 
   it('accepts a pilot that has actually been configured for one', () => {
@@ -314,7 +207,6 @@ describe('the deployment profile gate', () => {
         ...pilot(),
         profile: 'demo',
         publicSignUpEnabled: true,
-        otpRevealInUi: true,
         allowedOrigin: '*',
         alertEmail: undefined,
         mfa: 'off',
@@ -325,7 +217,6 @@ describe('the deployment profile gate', () => {
 
   it.each([
     ['PUBLIC_SIGNUP_ENABLED', { publicSignUpEnabled: true }],
-    ['OTP_REVEAL_IN_UI', { otpRevealInUi: true }],
     ['ALLOWED_ORIGIN', { allowedOrigin: '*' }],
     ['ALERT_EMAIL', { alertEmail: undefined }],
     ['COGNITO_MFA', { mfa: 'optional' as const }],
@@ -343,8 +234,8 @@ describe('the deployment profile gate', () => {
         assertDeploymentPosture({
           ...pilot(),
           publicSignUpEnabled: true,
-          otpRevealInUi: true,
           allowedOrigin: '*',
+          alertEmail: undefined,
         })
         return undefined
       } catch (e) {
@@ -353,16 +244,14 @@ describe('the deployment profile gate', () => {
     })()
 
     expect(err?.message).toContain('PUBLIC_SIGNUP_ENABLED')
-    expect(err?.message).toContain('OTP_REVEAL_IN_UI')
     expect(err?.message).toContain('ALLOWED_ORIGIN')
+    expect(err?.message).toContain('ALERT_EMAIL')
   })
 
-  it('holds prod to everything pilot requires, plus the sandbox instrument', () => {
+  it('holds prod to everything pilot requires', () => {
     const prod = { ...pilot(), profile: 'prod' as const }
-    expect(() => assertDeploymentPosture(prod)).toThrow('AUTO_PROVISION_SANDBOX_METHOD')
-    expect(() =>
-      assertDeploymentPosture({ ...prod, autoProvisionSandboxMethod: false }),
-    ).not.toThrow()
+    expect(() => assertDeploymentPosture(prod)).not.toThrow()
+    expect(() => assertDeploymentPosture({ ...prod, retainData: false })).toThrow('RETAIN_DATA')
   })
 
   it('defaults to demo and rejects a profile it does not know', () => {

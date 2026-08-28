@@ -2,10 +2,10 @@ name: CI
 
 # Runs the same checks `npm run verify` (+ `npm run audit`) already run locally before opening a PR
 # — see the root README's "Root scripts" table for what each one does. Nothing here needs AWS
-# credentials or Docker: the infra test suite deliberately excludes AgentStack (it builds a real
-# container image at synth time) from its synth-based assertions for exactly that reason, and this
-# workflow inherits the same boundary — a full `cdk synth`/`cdk deploy` is a separate, credentialed
-# concern, not a PR gate.
+# credentials: the infra test suite deliberately excludes AgentStack (it builds a real container
+# image at synth time) from its synth-based assertions for exactly that reason, and this workflow
+# inherits the same boundary — a full `cdk synth`/`cdk deploy` is a separate, credentialed concern,
+# not a PR gate.
 on:
   push:
     branches: [main]
@@ -39,7 +39,6 @@ jobs:
           cache: npm
           cache-dependency-path: |
             package-lock.json
-            ap2-core/package-lock.json
             agent/package-lock.json
             chatbot-bff/package-lock.json
             chatbot-frontend/package-lock.json

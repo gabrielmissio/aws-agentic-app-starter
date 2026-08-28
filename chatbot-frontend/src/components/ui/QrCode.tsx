@@ -2,18 +2,12 @@ import { useMemo } from 'react'
 import qrcode from 'qrcode-generator'
 
 /**
- * A QR code, rendered as SVG.
+ * A QR code as SVG, built from the encoder's `isDark(row, col)` grid rather than its
+ * `createSvgTag()` string — so no `dangerouslySetInnerHTML` — and drawn as one `<path>` rather than
+ * a rect per module, which for a 40×40 symbol is one node instead of a thousand.
  *
- * Built from the encoder's `isDark(row, col)` grid rather than its `createSvgTag()` string, so the
- * markup is React elements and never goes through `dangerouslySetInnerHTML` — a library that emits
- * markup should not be the reason an app opens that door.
- *
- * The modules are drawn as one `<path>` instead of a rect per module: a typical `otpauth://` URI
- * lands around 40×40, which is well over a thousand nodes as rects and one node this way.
- *
- * **The colours are fixed black on white in both themes, deliberately.** Contrast here is
- * functional, not decorative — a scanner needs dark modules on a light ground, and a QR that
- * inverted itself in dark mode would simply stop working on many cameras.
+ * **Fixed black on white in both themes.** Contrast here is functional: a code that inverted itself
+ * in dark mode stops scanning on many cameras.
  */
 export function QrCode({ value, label, size = 176 }: { value: string; label: string; size?: number }) {
   const { path, extent } = useMemo(() => {
@@ -43,8 +37,7 @@ export function QrCode({ value, label, size = 176 }: { value: string; label: str
       viewBox={`0 0 ${extent} ${extent}`}
       width={size}
       height={size}
-      // `shapeRendering` keeps the module edges from being antialiased into grey at small sizes,
-      // which is what turns a scannable code into an unscannable one.
+      // `shapeRendering` stops the edges antialiasing to grey at small sizes, which breaks scanning.
       shapeRendering="crispEdges"
       className="rounded-md"
     >

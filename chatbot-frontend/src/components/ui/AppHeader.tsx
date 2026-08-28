@@ -1,11 +1,8 @@
 import type { ReactNode } from 'react'
 
 /**
- * The chrome every full-screen surface shares — chat, admin and the Explorer.
- *
- * One header rather than three near-identical ones: the height, the alignment and the divider are
- * decided here, so a new screen in a new project inherits them for free. It spans the same
- * `max-w-3xl` column the content below it uses, so the title lines up with the first message.
+ * The chrome the chat and the admin panel share, so a new screen inherits the height, alignment and
+ * divider for free. Spans the same `max-w-3xl` column as the content below it.
  */
 export function AppHeader({
   leading,
@@ -24,11 +21,9 @@ export function AppHeader({
   /** Centres the title between `leading` and `actions` instead of letting it sit beside them. */
   center?: boolean
   /**
-   * A second row under the title, aligned with the content column — a tab bar, typically.
-   *
-   * Anything wider than a couple of icons belongs here rather than in `actions`. The top row does
-   * not wrap: on a phone a wrapped `actions` group lands as an unaligned orphan line beneath a
-   * centred title, which reads as a broken header rather than as a row.
+   * A second row under the title — a tab bar, typically. Anything wider than a couple of icons
+   * belongs here: the top row does not wrap, and a wrapped `actions` group lands on a phone as an
+   * unaligned orphan line under a centred title.
    */
   below?: ReactNode
 }) {

@@ -1,5 +1,4 @@
-import { Suspense, lazy, useEffect, useState } from 'react'
-import { Navigate, Route, Routes, useNavigate } from 'react-router-dom'
+import { useEffect, useState } from 'react'
 import { getCurrentUser, signOut } from 'aws-amplify/auth'
 import { AdminPanel } from '@/components/AdminPanel.tsx'
 import { ChatExperience } from '@/components/ChatExperience.tsx'
@@ -7,22 +6,10 @@ import { AuthScreen } from '@/components/AuthScreen.tsx'
 import { fetchGroups, isAdmin } from '@/lib/session-roles.ts'
 
 /**
- * The Explorer is loaded on demand.
- *
- * It is a distinct surface most sessions never open — someone chats, and only sometimes goes to
- * check how a payment was verified — so its timeline, markdown and route code have no business in
- * the bundle that has to render the first message.
+ * Three surfaces, switched by state rather than by a router: the auth screen, the chat, and the
+ * admin panel. There are no linkable, bookmarkable pages here — a router would buy nothing and cost
+ * a dependency plus a CloudFront SPA-fallback story. Add one when a deep link becomes real.
  */
-const ExplorerIndex = lazy(() =>
-  import('@/components/explorer/ExplorerIndex.tsx').then((m) => ({ default: m.ExplorerIndex })),
-)
-const JourneyView = lazy(() =>
-  import('@/components/explorer/JourneyView.tsx').then((m) => ({ default: m.JourneyView })),
-)
-const ActorsView = lazy(() =>
-  import('@/components/explorer/ActorsView.tsx').then((m) => ({ default: m.ActorsView })),
-)
-
 type View = 'chat' | 'admin'
 
 export function App() {
@@ -31,7 +18,6 @@ export function App() {
   const [email, setEmail] = useState<string>()
   const [admin, setAdmin] = useState(false)
   const [view, setView] = useState<View>('chat')
-  const navigate = useNavigate()
 
   /** Resolves the signed-in user, if any, and reports whether there is one. */
   const syncUser = () =>
@@ -61,9 +47,6 @@ export function App() {
       setEmail(undefined)
       setAdmin(false)
       setView('chat')
-      // Signing out from the Explorer would otherwise leave the router on a route the auth screen
-      // does not own, so the next sign-in lands somewhere unexpected.
-      navigate('/', { replace: true })
     }
   }
 
@@ -79,28 +62,16 @@ export function App() {
     )
   }
 
-  const chat =
-    view === 'admin' && admin ? (
-      <AdminPanel userEmail={email} onSignOut={handleSignOut} onBack={() => setView('chat')} />
-    ) : (
-      <ChatExperience
-        userEmail={email}
-        isAdmin={admin}
-        onSignOut={handleSignOut}
-        onOpenAdmin={() => setView('admin')}
-      />
-    )
+  if (view === 'admin' && admin) {
+    return <AdminPanel userEmail={email} onSignOut={handleSignOut} onBack={() => setView('chat')} />
+  }
 
   return (
-    <Suspense fallback={null}>
-      <Routes>
-        <Route path="/" element={chat} />
-        <Route path="/explorer" element={<ExplorerIndex />} />
-        <Route path="/explorer/actors" element={<ActorsView />} />
-        <Route path="/explorer/:journeyId" element={<JourneyView />} />
-        {/* Anything else lands back on the chat rather than on a blank page. */}
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
-    </Suspense>
+    <ChatExperience
+      userEmail={email}
+      isAdmin={admin}
+      onSignOut={handleSignOut}
+      onOpenAdmin={() => setView('admin')}
+    />
   )
 }

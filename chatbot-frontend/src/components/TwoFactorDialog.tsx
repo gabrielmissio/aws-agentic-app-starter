@@ -13,21 +13,13 @@ import { TotpSecret } from './TotpSecret.tsx'
 import { Alert, Button, CARD_CLASS, Field, TextInput } from './ui/index.ts'
 
 /**
- * Voluntary second-factor enrollment, for the mode that has no other way in.
+ * Voluntary second-factor enrollment — the only path under `optional`, where Cognito challenges
+ * users who already have a factor but never asks anyone to create one. Under `required` this only
+ * confirms what sign-in already did; under `off` it is not rendered at all.
  *
- * Under `required` Cognito enrolls people during sign-in and this panel is only a place to confirm
- * it happened. Under `optional` it is the *only* path: Cognito challenges users who already have a
- * factor and never asks anyone to create one, so without somewhere to opt in, `optional` and `off`
- * are the same deployment. Under `off` the trigger is not rendered at all — see `UserMenu`.
- *
- * Disabling is offered only where Cognito would allow it. Removing the last factor from a pool that
- * mandates one is refused, and a button that always fails is worse than no button.
- *
- * Rendered through a portal into `document.body`, which is not a detail. It is opened from the user
- * menu inside `AppHeader`, and that header sets `backdrop-blur` — `backdrop-filter` makes an element
- * a containing block for `position: fixed` descendants, so `inset-0` resolved against the header
- * strip and the dialog appeared centred inside it, clipped. A portal is the fix that survives
- * whatever the next ancestor adds.
+ * Portalled into `document.body`, which is not a detail: `AppHeader` sets `backdrop-blur`, and
+ * `backdrop-filter` makes an element a containing block for `position: fixed` descendants — so
+ * `inset-0` would resolve against the header strip and the dialog would render clipped inside it.
  */
 export function TwoFactorDialog({ email, onClose }: { email?: string; onClose: () => void }) {
   const { t } = useI18n()
@@ -45,9 +37,8 @@ export function TwoFactorDialog({ email, onClose }: { email?: string; onClose: (
   }
 
   useEffect(() => {
-    // Once, when the dialog opens — it is mounted only while open, so unmounting is what resets it.
-    // The panel shows the account's real state rather than an assumption from the mode: under
-    // `optional` two users of the same deployment are legitimately in different states.
+    // Once per open — the dialog is mounted only while open. It reads the account's real state
+    // rather than assuming from the mode: under `optional`, two users legitimately differ.
     refresh().catch(() => setError(t('mfa.loadFailed')))
   }, [])
 
@@ -58,8 +49,7 @@ export function TwoFactorDialog({ email, onClose }: { email?: string; onClose: (
       const details = await setUpTOTP()
       setSetup({
         sharedSecret: details.sharedSecret,
-        // Issuer and account both, so someone enrolled in more than one environment can tell the
-        // entries apart in their authenticator's list.
+        // Both, so someone enrolled in two environments can tell the entries apart.
         setupUri: details.getSetupUri(BRAND.name, email).toString(),
       })
       setCode('')
@@ -76,7 +66,7 @@ export function TwoFactorDialog({ email, onClose }: { email?: string; onClose: (
     try {
       await verifyTOTPSetup({ code: code.trim() })
       // Verifying associates the device; it does not switch the factor on. Without this the user
-      // would finish the flow, be told they are protected, and never be challenged again.
+      // finishes the flow, is told they are protected, and is never challenged.
       await updateMFAPreference({ totp: 'PREFERRED' })
       setSetup(null)
       setDone(t('mfa.enrolledNow'))
@@ -127,9 +117,8 @@ export function TwoFactorDialog({ email, onClose }: { email?: string; onClose: (
       onClick={onClose}
     >
       <div
-        // `my-auto` rather than a centred flex child alone: with the QR code the panel can be taller
-        // than a short viewport, and a centred flex item that overflows is clipped at the top with
-        // no way to scroll to it.
+        // `my-auto`, not a centred flex child: with the QR the panel can outgrow a short viewport,
+        // and a centred flex item that overflows is clipped at the top with no way to scroll to it.
         className={`${CARD_CLASS} my-auto w-full max-w-sm p-6 shadow-[var(--shadow-pop)]`}
         onClick={(e) => e.stopPropagation()}
       >

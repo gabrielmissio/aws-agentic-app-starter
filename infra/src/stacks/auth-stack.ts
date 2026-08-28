@@ -31,7 +31,7 @@ export interface AuthStackProps extends cdk.StackProps {
   profile?: DeployProfile
   /**
    * Second-factor posture. `required` enrolls every user; `optional` leaves it to them, which for a
-   * system that approves payments means most of them will not.
+   * system holding real conversations means most of them will not.
    */
   mfa?: MfaMode
   /**
@@ -55,20 +55,15 @@ const MFA_BY_MODE: Record<MfaMode, cognito.Mfa> = {
 }
 
 /**
- * The Cognito User Pool behind the browser session.
+ * The Cognito User Pool behind the browser session. The browser signs in, gets an id token, and
+ * sends it to the BFF, where the gateway authorizer validates it and every route reads its caller
+ * from the verified claims.
  *
- * The browser signs in, gets a JWT id token, and sends it to the BFF; the API Gateway Cognito
- * authorizer validates signature, expiry and issuer and hands the verified claims to the Lambda,
- * which is where every route reads its caller from. Under `publicSignUpEnabled: false` an admin
- * creates the user first and the initial sign-in answers Cognito's NEW_PASSWORD_REQUIRED challenge.
- *
- * **There is no Identity Pool here, deliberately.** The browser gets a user pool token and nothing
- * else — no AWS credentials, no assumable role, no `sts:AssumeRoleWithWebIdentity` path. A pool
- * would vend credentials that let the browser reach the AgentCore runtime itself and compose the
- * identity block the agent trusts, and every policy on its authenticated role is a policy granted to
- * anyone who can sign in. `stacks.test.ts` asserts the absence, because adding one back is easy to
- * do by habit. If some future feature really needs a browser-side AWS call, the pool belongs in the
- * stack that needs it, scoped to that one API — not here as ambient capability.
+ * **There is no Identity Pool here, deliberately.** The browser gets a token and no AWS credentials.
+ * A pool would vend credentials that let the browser reach the runtime directly and compose the
+ * identity block the agent trusts, and every policy on its authenticated role is granted to anyone
+ * who can sign in. `stacks.test.ts` asserts the absence, because adding one back is easy to do by
+ * habit. A future browser-side AWS call belongs in the stack that needs it, scoped to that one API.
  */
 export class AuthStack extends cdk.Stack {
   public readonly userPool: cognito.UserPool
@@ -96,42 +91,26 @@ export class AuthStack extends cdk.Stack {
       signInAliases: { email: true },
       autoVerify: { email: true },
       /**
-       * Email alone.
-       *
-       * No `phone_number`: nothing in this application ever writes one — sign-up sends an email and
-       * a locale, the admin invite sends an email, and there is no profile screen — so the attribute
-       * would be a slot in the schema with no writer, and the SMS paths that read it would still
-       * have nothing to send to.
-       *
-       * It is also not a decision that can be deferred and then taken. Cognito adds only *custom*
-       * attributes to a live pool, so CloudFormation's attempt to add a standard one fails the whole
-       * update with *"Invalid AttributeDataType input"* — which is what adding it here unconditionally
-       * did to an existing deployment. A pool that ever needs it has to be created with it.
-       *
-       * The consequence, stated rather than hidden: the checkout step-up has no SMS channel, so
-       * `/intent` refuses any checkout at or above `OTP_STEPUP_THRESHOLD_CENTS` with
-       * `stepUpUnavailable`. Choosing that channel is an open decision, not a missing line here.
+       * Email alone. No `phone_number`: nothing here writes one, so it would be a slot with no
+       * writer — and it cannot be added later, since Cognito accepts only *custom* attributes on a
+       * live pool and fails the whole update with "Invalid AttributeDataType input" otherwise.
+       * Hence no SMS channel anywhere in this deployment, and an authenticator app as the factor.
        */
       standardAttributes: {
         email: { required: true, mutable: true },
       },
-      // Set at invite/sign-up time, read by the CustomMessage trigger to pick the email's language.
+      // Read by the CustomMessage trigger to pick the email's language.
       //
-      // The name must NOT be `locale`. CDK renders a custom attribute as a bare
-      // `{ Name, AttributeDataType }` entry with no `custom:` prefix — Cognito adds that — so naming
-      // it after a reserved standard attribute is indistinguishable from declaring the standard one.
-      // Cognito then never creates `custom:locale`, and writes fail at runtime with "Type for
-      // attribute {custom:locale} could not be determined".
-      //
-      // Adding a custom attribute is a one-way door: Cognito cannot delete one from a pool's schema.
+      // It must NOT be named `locale`: CDK renders a custom attribute without the `custom:` prefix,
+      // so a reserved standard name is indistinguishable from declaring the standard one — Cognito
+      // then never creates it and every write fails at runtime. Also a one-way door: a custom
+      // attribute cannot be removed from a pool's schema.
       customAttributes: {
         inviteLocale: new cognito.StringAttribute({ mutable: true }),
       },
-      // Plain-text fallbacks, sent if the CustomMessage trigger below declines or fails. Kept
-      // legible rather than duplicating `lambdas/custom-message/email-template.mjs`.
-      //
-      // Both apply regardless of `publicSignUpEnabled`: an admin can always invite via
-      // `AdminCreateUser`, and `userVerification` simply goes unused when self sign-up is off.
+      // Plain-text fallbacks, sent if the CustomMessage trigger declines or fails. Both apply
+      // regardless of `publicSignUpEnabled`: an admin can always invite, and `userVerification`
+      // simply goes unused when self sign-up is off.
       userInvitation: {
         emailSubject: `Your ${projectName} access`,
         emailBody: [
@@ -154,34 +133,16 @@ export class AuthStack extends cdk.Stack {
         emailStyle: cognito.VerificationEmailStyle.CODE,
       },
       /**
-       * Enrollment is not optional outside a demo. An account here approves payments and reads a
-       * purchase history, so a password alone is the whole of the authentication — and `OPTIONAL`
-       * in practice means most people never enroll.
+       * An authenticator app, and only that. `SMS_MFA` is not offered because no phone number is
+       * ever collected (see the schema above), so it would be a factor nobody could enroll in —
+       * while still making CDK provision an unused SNS caller role and adding a dead-end branch to
+       * the sign-in journey.
        *
-       * **An authenticator app, and only that.**
-       *
-       * `SMS_MFA` is deliberately not offered. Nothing in this application collects a phone number —
-       * sign-up sends `email` and a locale, the admin invite sends `email` and `email_verified`, and
-       * there is no profile screen — so an SMS factor would be one no user could enroll in. Cognito
-       * would also need the number *verified*, and this pool auto-verifies email alone.
-       *
-       * Offering it anyway is not a harmless fallback: it makes CDK provision an SNS caller role and
-       * an `SmsConfiguration` that nothing uses, and it puts a second enrollment path in the sign-in
-       * journey that dead-ends. TOTP is what actually enrolls a user, so TOTP is what is on offer.
-       *
-       * If a phone-collection flow is ever added, this is where SMS comes back — and the pool would
-       * have to be recreated to carry the attribute.
-       *
-       * Omitted entirely when `off` rather than written as an explicit `OFF`, which is what Cognito
-       * defaults to anyway. The point is that a deployment that sets nothing renders the template it
-       * rendered before this existed — an upgrade of the template should not be a change to the
-       * infrastructure.
+       * Omitted entirely when `off` rather than written as an explicit `OFF`, so a deployment that
+       * sets nothing renders the same template it did before this option existed.
        */
       ...(mfa === 'off' ? {} : { mfa: MFA_BY_MODE[mfa], mfaSecondFactor: { sms: false, otp: true } }),
-      /**
-       * Twelve with a symbol outside a demo. Eight-with-no-symbol is the Cognito default and is
-       * below every current baseline for an account that can move money.
-       */
+      /** Twelve with a symbol outside a demo; Cognito's own default is eight with no symbol. */
       passwordPolicy: {
         minLength: hardened ? 12 : 8,
         requireLowercase: true,
@@ -190,10 +151,9 @@ export class AuthStack extends cdk.Stack {
         requireSymbols: hardened,
       },
       /**
-       * Compromised-credential and risk detection, off by default because it is billed: any mode
-       * other than `off` moves the pool onto the Plus feature plan, priced per monthly active user.
-       * The profile gate refuses `off` for a pilot, so the cost is a decision rather than a
-       * side effect.
+       * Off by default because it is billed: any other mode moves the pool onto the Plus feature
+       * plan, priced per monthly active user. The profile gate refuses `off` for a pilot, so the
+       * cost is a decision rather than a side effect.
        */
       ...(threatProtection === 'off'
         ? {}
@@ -211,9 +171,8 @@ export class AuthStack extends cdk.Stack {
     })
 
     // ── HTML invite & verification emails ────────────────────────────────
-    // Rewrites the two emails above as designed HTML, adding a sign-in link when the app URL is
-    // known. It sits on the critical path of `AdminCreateUser` and `SignUp`, which is why it
-    // swallows its own failures and lets the plain-text templates go out instead.
+    // Rewrites the two emails above as HTML. It sits on the critical path of `AdminCreateUser` and
+    // `SignUp`, which is why it swallows its own failures and lets the plain text go out instead.
     const appUrlParameter = appUrlParameterName(projectName)
 
     const customMessageFn = new lambda.Function(this, 'CustomMessageFunction', {
@@ -255,8 +214,8 @@ export class AuthStack extends cdk.Stack {
 
 
     // ── Groups (roles) ─────────────────────────────────────────────────
-    // Cognito emits membership as the `cognito:groups` claim on both tokens with no Lambda in the
-    // request path — unlike a pre-token-generation trigger, which would bill on every issuance.
+    // Membership arrives as the `cognito:groups` claim on both tokens, with no Lambda in the
+    // request path — unlike a pre-token-generation trigger, which bills on every issuance.
     new cognito.CfnUserPoolGroup(this, 'AdminsGroup', {
       userPoolId: this.userPool.userPoolId,
       groupName: ADMIN_GROUP_NAME,

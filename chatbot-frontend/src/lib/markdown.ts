@@ -3,20 +3,13 @@
  * handle rather than hope away:
  *
  *  - **A table that lost its line breaks.** GFM tables are line-based, so `| a | b | |---|---| | c |
- *    d |` on one line renders as a paragraph full of pipes. The delimiter row is the tell — prose
- *    essentially never contains one — so the cells re-chunk into rows by its column count.
- *  - **A code fence that has not closed yet.** Mid-stream an open ``` swallows the rest of the
- *    message; closing it for the parse keeps the block rendering from its first line.
+ *    d |` on one line is a paragraph full of pipes. The delimiter row is the tell — prose never
+ *    contains one — so the cells re-chunk into rows by its column count.
+ *  - **A code fence that has not closed yet**, which mid-stream swallows the rest of the message.
  *
- * Text-in, text-out, and never applied inside a fenced block — a code sample may contain anything,
- * including a line that looks like a table.
- *
- * ROADMAP: none of this should be load-bearing for the checkout. The cart is structured data the
- * server already holds — `ap2-handler.ts` builds `items`, `merchantName`, `amountCents` and then
- * returns only `summary`, so the UI asks the model to retype what was already computed and repairs
- * the retyping here. Widening `CheckoutIntent` and rendering the cart table from the intent the way
- * `CheckoutCard` already renders the rest would delete the need for the repair on the one message
- * where being wrong costs money. This file stays for the agent's ordinary prose.
+ * Never applied inside a fenced block: a code sample may contain a line that looks like a table.
+ * A repair, not a guarantee — anything that has to be *right* belongs in structured data the UI
+ * renders itself, not in prose the model retypes.
  */
 
 /** Matches a delimiter row (`|---|---|`, `| :--- | ---: |`) wherever it appears. */
@@ -148,13 +141,12 @@ export function normalizeMarkdown(content: string): string {
 }
 
 /**
- * Splits streaming content into the part safe to parse and the fragment still being written, at the
- * last line break: complete lines re-parse cleanly as the next arrives, while the unfinished line
- * stays plain text so a half-typed row never renders as a broken one.
+ * Splits streaming content at the last line break: complete lines parse, the unfinished one stays
+ * plain text so a half-typed row never renders as a broken one.
  *
  * The exception is a line flattening a table onto itself — held back, it shows a growing wall of
- * pipes and then snaps into a table at the end. Once the delimiter row arrives the whole content
- * goes through the repair instead, so the table fills in row by row.
+ * pipes and then snaps into place. Once the delimiter row arrives the repair runs on the whole
+ * content instead, so the table fills in row by row.
  */
 export function splitStreamingMarkdown(content: string): { complete: string; tail: string } {
   const lastBreak = content.lastIndexOf('\n')

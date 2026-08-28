@@ -1,38 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
-import { Link } from 'react-router-dom'
-import { BookOpen, ScrollText, Send, ShieldCheck, Wallet, Zap } from 'lucide-react'
+import { CalendarClock, Lightbulb, Send, ShieldCheck, Sparkles } from 'lucide-react'
 import { UserMenu } from './UserMenu.tsx'
 import { ChatBubble, type ChatMessage } from './ChatBubble.tsx'
 import { ThinkingBubble } from './ThinkingBubble.tsx'
 import { LanguageSwitcher } from './LanguageSwitcher.tsx'
-import { CheckoutCard } from './ap2/CheckoutCard.tsx'
-import { ReceiptCard } from './ap2/ReceiptCard.tsx'
-import { AppHeader, BrandAvatar, Button, CARD_CLASS, iconButtonClass } from './ui/index.ts'
+import { AppHeader, BrandAvatar, Button, CARD_CLASS } from './ui/index.ts'
 import { sendMessageBff } from '@/lib/api.ts'
-import { openCheckout, type CheckoutIntent, type Receipt } from '@/lib/ap2/api.ts'
 import { BRAND } from '@/lib/brand.ts'
 import { useI18n } from '@/lib/i18n/context.ts'
 import { isZoomed } from '@/lib/viewport.ts'
-
-/**
- * A note handed to the agent on the user's next turn, telling it how a checkout ended.
- *
- * The authorization and the settlement happen outside the agent — which is the point of the design —
- * so this is the only way it learns that a journey closed. It is sent to the model and never shown
- * in the user's own bubble.
- */
-function outcomeNote(outcome: 'paid' | 'declined' | 'expired', receipt?: Receipt): string {
-  const closing =
-    'That journey is now closed. For anything further, start a NEW journey with a fresh cart.'
-
-  if (outcome === 'paid' && receipt) {
-    return `[SYSTEM EVENT — not visible to the user] The proposed order (journeyId ${receipt.journeyId}) was authorized and PAID (receipt ${receipt.receiptId}). ${closing}`
-  }
-  if (outcome === 'declined') {
-    return `[SYSTEM EVENT — not visible to the user] The user DECLINED the proposed order. No payment was made and that journey is closed. Do not re-propose it unless the user asks.`
-  }
-  return `[SYSTEM EVENT — not visible to the user] The proposed order EXPIRED before the user authorized it. No payment was made. ${closing}`
-}
 
 /** How far from the bottom still counts as following the conversation rather than reading back. */
 const FOLLOW_SLACK = 120
@@ -55,10 +31,10 @@ export interface ChatExperienceProps {
 export function ChatExperience({ userEmail, isAdmin, onSignOut, onOpenAdmin }: ChatExperienceProps) {
   const { t } = useI18n()
   const SUGGESTIONS = [
-    { icon: BookOpen, label: t('chat.suggestionMenuLabel'), prompt: t('chat.suggestionMenuPrompt') },
-    { icon: Zap, label: t('chat.suggestionProteinLabel'), prompt: t('chat.suggestionProteinPrompt') },
-    { icon: Wallet, label: t('chat.suggestionCheapLabel'), prompt: t('chat.suggestionCheapPrompt') },
-    { icon: ShieldCheck, label: t('chat.suggestionAp2Label'), prompt: t('chat.suggestionAp2Prompt') },
+    { icon: CalendarClock, label: t('chat.suggestionDayLabel'), prompt: t('chat.suggestionDayPrompt') },
+    { icon: Lightbulb, label: t('chat.suggestionIdeaLabel'), prompt: t('chat.suggestionIdeaPrompt') },
+    { icon: Sparkles, label: t('chat.suggestionDraftLabel'), prompt: t('chat.suggestionDraftPrompt') },
+    { icon: ShieldCheck, label: t('chat.suggestionAboutLabel'), prompt: t('chat.suggestionAboutPrompt') },
   ]
 
   const [signingOut, setSigningOut] = useState(false)
@@ -73,27 +49,13 @@ export function ChatExperience({ userEmail, isAdmin, onSignOut, onOpenAdmin }: C
   const [thinking, setThinking] = useState(false)
   const [sessionId, setSessionId] = useState<string | undefined>()
 
-  // The open checkout, and which agent message it belongs under.
-  const [pendingCheckout, setPendingCheckout] = useState<CheckoutIntent | null>(null)
-  const [checkoutMsgId, setCheckoutMsgId] = useState<string | null>(null)
-  // Keyed by message id so every past receipt stays where it happened in the conversation.
-  const [receipts, setReceipts] = useState<Map<string, Receipt>>(new Map())
-
-  /**
-   * The outcome note owed to the agent on the next turn.
-   *
-   * A ref rather than state: nothing renders from it, and putting it in state would re-render the
-   * whole conversation each time a checkout closed.
-   */
-  const pendingNote = useRef<string | null>(null)
-
   const scrollRef = useRef<HTMLDivElement>(null)
   /** Whether the reader is following the conversation or has scrolled back into its history. */
   const following = useRef(true)
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
-  }, [messages, thinking, pendingCheckout])
+  }, [messages, thinking])
 
   /**
    * Re-pins the conversation when the software keyboard opens.
@@ -118,21 +80,6 @@ export function ChatExperience({ userEmail, isAdmin, onSignOut, onOpenAdmin }: C
     return () => viewport.removeEventListener('resize', repin)
   }, [])
 
-  /** Closes the card, records the outcome for the agent, and says so in the conversation. */
-  const closeCheckout = (outcome: 'declined' | 'expired') => {
-    setPendingCheckout(null)
-    setCheckoutMsgId(null)
-    pendingNote.current = outcomeNote(outcome)
-    setMessages((m) => [
-      ...m,
-      {
-        id: crypto.randomUUID(),
-        role: 'agent',
-        content: t(outcome === 'declined' ? 'ap2.checkout.declinedMessage' : 'ap2.checkout.expiredMessage'),
-      },
-    ])
-  }
-
   const handleSignOut = async () => {
     if (!onSignOut || signingOut) return
     setSigningOut(true)
@@ -152,22 +99,12 @@ export function ChatExperience({ userEmail, isAdmin, onSignOut, onOpenAdmin }: C
     setInput('')
     setThinking(true)
 
-    // Any checkout outcome the agent has not been told about rides along ahead of the user's text.
-    // It goes to the model only — the bubble above shows what the user actually typed.
-    const note = pendingNote.current
-    pendingNote.current = null
-    const payload = note ? `${note}\n\n${trimmed}` : trimmed
-
     // Ensure we have a session id
     const currentSessionId = sessionId ?? crypto.randomUUID()
     if (!sessionId) setSessionId(currentSessionId)
 
     const agentMsgId = crypto.randomUUID()
     const toolsUsed: string[] = []
-    /** Set when the agent opens a consent session; the checkout gate opens once the turn ends. */
-    let consentSessionId: string | null = null
-    /** Guards the gate against being opened twice for one proposal. */
-    let checkoutOpened = false
 
     // Placeholder bubble the stream fills in.
     setMessages((m) => [
@@ -186,9 +123,6 @@ export function ChatExperience({ userEmail, isAdmin, onSignOut, onOpenAdmin }: C
     const patch = (fn: (msg: ChatMessage) => ChatMessage) =>
       setMessages((m) => m.map((msg) => (msg.id === agentMsgId ? fn(msg) : msg)))
 
-    // One set of callbacks for both transports. They differ only in how the stream reaches the
-    // browser — direct from AgentCore, or re-streamed by the BFF — and nothing downstream of the
-    // parser cares which, so the checkout wiring below exists in exactly one place.
     const callbacks = {
       onSessionId: (newSessionId: string) => setSessionId(newSessionId),
       onToken: (token: string) =>
@@ -208,23 +142,8 @@ export function ChatExperience({ userEmail, isAdmin, onSignOut, onOpenAdmin }: C
       },
       onThinking: () => patch((msg) => ({ ...msg, status: t('chat.statusThinking') })),
       onStatus: (status: string) => patch((msg) => ({ ...msg, status })),
-      onConsentProposed: (id: string) => {
-        consentSessionId = id
-      },
-      onComplete: () => {
-        patch((msg) => ({ ...msg, isStreaming: false, activeTool: undefined, status: undefined }))
-
-        // Opened only once the turn is complete, so the card appears under a finished proposal
-        // rather than under a half-written one — and only once per turn: the server issues a fresh
-        // one-time code on every open, so a second call would invalidate the code already on screen.
-        if (!consentSessionId || checkoutOpened) return
-        checkoutOpened = true
-        void openCheckout(consentSessionId).then((intent) => {
-          if (!intent) return
-          setPendingCheckout(intent)
-          setCheckoutMsgId(agentMsgId)
-        })
-      },
+      onComplete: () =>
+        patch((msg) => ({ ...msg, isStreaming: false, activeTool: undefined, status: undefined })),
       onError: (error: Error) =>
         patch((msg) => ({
           ...msg,
@@ -236,7 +155,7 @@ export function ChatExperience({ userEmail, isAdmin, onSignOut, onOpenAdmin }: C
     }
 
     try {
-      await sendMessageBff(payload, currentSessionId, callbacks)
+      await sendMessageBff(trimmed, currentSessionId, callbacks)
     } catch {
       patch((msg) => ({
         ...msg,
@@ -258,14 +177,6 @@ export function ChatExperience({ userEmail, isAdmin, onSignOut, onOpenAdmin }: C
         actions={
           <>
             <LanguageSwitcher />
-            <Link
-              to="/explorer"
-              title={t('ap2.explorer.open')}
-              aria-label={t('ap2.explorer.open')}
-              className={iconButtonClass()}
-            >
-              <ScrollText className="h-4 w-4" />
-            </Link>
             {isAdmin && onOpenAdmin && (
               <Button
                 variant="secondary"
@@ -300,30 +211,6 @@ export function ChatExperience({ userEmail, isAdmin, onSignOut, onOpenAdmin }: C
               key={m.id}
               message={
                 m.id === 'welcome' ? { ...m, content: t('chat.welcome', { brand: BRAND.name }) } : m
-              }
-              slot={
-                m.id === checkoutMsgId && pendingCheckout ? (
-                  <CheckoutCard
-                    intent={pendingCheckout}
-                    onAuthorized={(receipt) => {
-                      // The receipt gets its own bubble, so the proposal above stays readable as the
-                      // thing that was authorized rather than being replaced by its outcome.
-                      const receiptMsgId = crypto.randomUUID()
-                      setMessages((prev) => [
-                        ...prev,
-                        { id: receiptMsgId, role: 'agent', content: '' },
-                      ])
-                      setReceipts((prev) => new Map(prev).set(receiptMsgId, receipt))
-                      setPendingCheckout(null)
-                      setCheckoutMsgId(null)
-                      pendingNote.current = outcomeNote('paid', receipt)
-                    }}
-                    onDeclined={() => closeCheckout('declined')}
-                    onExpired={() => closeCheckout('expired')}
-                  />
-                ) : (
-                  receipts.get(m.id) && <ReceiptCard receipt={receipts.get(m.id) as Receipt} />
-                )
               }
             />
           ))}

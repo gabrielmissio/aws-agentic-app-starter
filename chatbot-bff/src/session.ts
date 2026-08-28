@@ -16,11 +16,9 @@ export function sessionNamespace(userId: string): string {
 }
 
 /**
- * Resolves the session id for a request. A client-supplied id is honored only if it carries the
- * caller's namespace and clears AgentCore's minimum length; anything else mints a fresh one
- * silently, since "forged" and "just expired" are indistinguishable to the client either way.
- *
- * `generate` is injectable so a test can assert a fresh id without depending on `randomUUID()`.
+ * A client-supplied id is honored only if it carries the caller's namespace and clears AgentCore's
+ * minimum length; anything else mints a fresh one silently, since "forged" and "just expired" look
+ * the same to the client. `generate` is injectable so a test need not depend on `randomUUID()`.
  */
 export function resolveSessionId(
   candidate: unknown,

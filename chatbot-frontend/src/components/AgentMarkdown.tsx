@@ -4,9 +4,8 @@ import remarkGfm from 'remark-gfm'
 /**
  * The agent's own text, rendered as Markdown.
  *
- * Tables are the reason this exists: a checkout proposal is a table of merchant, items, fee and
- * total, and a price someone is about to authorize should be laid out as one rather than run
- * together in a paragraph. GFM is what makes that table syntax work at all.
+ * Tables are the reason this exists: anything the agent lays out for comparison reads as a table
+ * and as a paragraph full of pipe characters otherwise. GFM is what makes that syntax work at all.
  *
  * The user's own messages stay plain text. They are not a formatting surface, and rendering them
  * would mean anything a user types could restyle the conversation around it.

@@ -1,12 +1,9 @@
 #!/usr/bin/env node
 import * as cdk from 'aws-cdk-lib'
 import { AgentStack } from './stacks/agent-stack.js'
-import { Ap2EntitiesStack } from './stacks/ap2-entities-stack.js'
 import { AuthStack } from './stacks/auth-stack.js'
 import { BffStack } from './stacks/bff-stack.js'
-import { DataStack } from './stacks/data-stack.js'
 import { FrontendStack } from './stacks/frontend-stack.js'
-import { SecurityStack } from './stacks/security-stack.js'
 import {
   assertDeploymentPosture,
   assertDeploymentTarget,
@@ -15,20 +12,14 @@ import {
   pickDefinedEnvironment,
   resolveAgentImagePlatform,
   resolveAlertEmail,
-  resolveAllowedMpps,
   resolveAllowedOrigin,
-  resolveAp2RateLimit,
   resolveApiThrottle,
-  resolveAutoProvisionSandboxMethod,
   resolveBedrockModelId,
   resolveDeployProfile,
   resolveExpectedAccount,
   resolveExpectedRegion,
-  resolveIntentTtlMinutes,
   resolveMfaMode,
   resolveMonthlyBudgetUsd,
-  resolveOtpRevealInUi,
-  resolveOtpStepUpThresholdCents,
   resolvePublicSignUpEnabled,
   resolveRetainData,
   resolveThreatProtection,
@@ -86,34 +77,17 @@ const userRateLimit = resolveUserRateLimit(
 
 const appUrl = process.env.APP_URL?.trim() || undefined
 
-// ── AP2 ────────────────────────────────────────────────────────────────
-const allowedMpps = resolveAllowedMpps(process.env.ALLOWED_MPPS)
-const autoProvisionSandboxMethod = resolveAutoProvisionSandboxMethod(
-  process.env.AUTO_PROVISION_SANDBOX_METHOD,
-)
-const otpStepUpThresholdCents = resolveOtpStepUpThresholdCents(
-  process.env.OTP_STEPUP_THRESHOLD_CENTS,
-)
-const intentTtlMinutes = resolveIntentTtlMinutes(process.env.INTENT_TTL_MIN)
-const ap2RateLimit = resolveAp2RateLimit(
-  process.env.AP2_RATE_LIMIT,
-  process.env.AP2_RATE_LIMIT_WINDOW_SECONDS,
-)
-const otpRevealInUi = resolveOtpRevealInUi(process.env.OTP_REVEAL_IN_UI)
-
 // The gate. It runs before a single construct is instantiated, so a `pilot` or `prod` deployment
 // still carrying a sandbox default fails at `cdk synth` — not at `cdk deploy`, and not in review.
 // Everything it judges is resolved above; nothing below it can weaken what it checked.
 assertDeploymentPosture({
   profile,
   publicSignUpEnabled,
-  otpRevealInUi,
   allowedOrigin,
   alertEmail,
   mfa,
   threatProtection,
   retainData,
-  autoProvisionSandboxMethod,
 })
 
 // ── Auth (Cognito User Pool) ───────────────────────────────────────────
@@ -128,33 +102,6 @@ const authStack = new AuthStack(app, `${projectName}-auth`, {
   env,
 })
 
-// ── AP2 state and signing keys ─────────────────────────────────────────
-// Deployed before the entities that use them: the entity roles are granted against these ARNs, so
-// the dependency runs data/security → entities and never the other way.
-const dataStack = new DataStack(app, `${projectName}-data`, {
-  projectName,
-  retainData,
-  env,
-})
-
-const securityStack = new SecurityStack(app, `${projectName}-security`, {
-  projectName,
-  retainData,
-  env,
-})
-
-// ── AP2 entities (the five verifying Lambdas) ──────────────────────────
-const ap2Stack = new Ap2EntitiesStack(app, `${projectName}-ap2`, {
-  projectName,
-  data: dataStack,
-  security: securityStack,
-  allowedMpps,
-  autoProvisionSandboxMethod,
-  env,
-})
-ap2Stack.addStackDependency(dataStack)
-ap2Stack.addStackDependency(securityStack)
-
 // ── Agent Runtime (Bedrock AgentCore + container image) ───────────────
 // SigV4-only: no authorizer configuration, and nothing outside the BFF's execution role is granted
 // `InvokeAgentRuntime`. The stack therefore needs nothing from the auth stack at all — see the note
@@ -162,11 +109,10 @@ ap2Stack.addStackDependency(securityStack)
 const agentStack = new AgentStack(app, `${projectName}-agent`, {
   projectName,
   imagePlatform: agentImagePlatform,
-  ap2: ap2Stack,
   // Passed through to the container as plain `environmentVariables` on the CfnRuntime, so anything
   // listed here is readable in the CloudFormation template and by any principal holding
   // `bedrock-agentcore:GetAgentRuntime`. Non-secret configuration only — a real secret belongs in
-  // Secrets Manager and gets fetched at cold start, the way the BFF reads its HMAC key.
+  // Secrets Manager and gets fetched at cold start.
   // `BEDROCK_MODEL_ID` is set by the stack itself from `modelId`, not passed through here — the
   // role is scoped to that one model, so the value the container reads and the value IAM allows
   // have to come from the same place.
@@ -174,7 +120,6 @@ const agentStack = new AgentStack(app, `${projectName}-agent`, {
   modelId: resolveBedrockModelId(process.env.BEDROCK_MODEL_ID),
   env,
 })
-agentStack.addStackDependency(ap2Stack)
 
 // ── BFF (API Gateway + Lambda) ─────────────────────────────────────────────────
 const bffStack = new BffStack(app, `${projectName}-bff`, {
@@ -186,18 +131,10 @@ const bffStack = new BffStack(app, `${projectName}-bff`, {
   userRateLimit,
   alertEmail,
   monthlyBudgetUsd,
-  ap2: ap2Stack,
-  data: dataStack,
-  security: securityStack,
-  intentTtlMinutes,
-  otpStepUpThresholdCents,
-  otpRevealInUi,
-  ap2RateLimit,
   wafEnabled,
   env,
 })
 bffStack.addStackDependency(agentStack)
-bffStack.addStackDependency(ap2Stack)
 
 // ── Frontend (S3 + CloudFront) ─────────────────────────────────────────
 // Must run AFTER auth and bff stacks so their outputs are available.

@@ -2,7 +2,7 @@ import type { ReactNode } from 'react'
 import { cn, TONE_CLASS, type Tone } from './styles.ts'
 
 /**
- * A short, tinted statement: an error on a form, or the Explorer's verdict on a chain.
+ * A short, tinted statement: an error on a form, or the outcome of something the user just did.
  *
  * `role="status"` rather than `alert` by default — most uses report an outcome the user just caused,
  * and an assertive live region interrupting a screen reader for that is noise. Pass `role="alert"`

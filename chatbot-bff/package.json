@@ -13,12 +13,7 @@
   "dependencies": {
     "@aws-sdk/client-bedrock-agentcore": "^3.1032.0",
     "@aws-sdk/client-cognito-identity-provider": "^3.1108.0",
-    "@aws-sdk/client-dynamodb": "^3.1108.0",
-    "@aws-sdk/client-kms": "^3.1116.0",
-    "@aws-sdk/client-secrets-manager": "^3.1116.0",
-    "@aws-sdk/client-sns": "^3.1116.0",
-    "@aws-sdk/lib-dynamodb": "^3.1116.0",
-    "ap2-core": "file:../ap2-core"
+    "@aws-sdk/client-dynamodb": "^3.1108.0"
   },
   "devDependencies": {
     "@dotenvx/dotenvx": "^1.61.0",
