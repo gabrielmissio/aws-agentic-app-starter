@@ -11,17 +11,17 @@
     "dev": "dotenvx run -f .env --overload -- tsx src/local.ts"
   },
   "dependencies": {
-    "@aws-sdk/client-bedrock-agentcore": "^3.1032.0",
-    "@aws-sdk/client-cognito-identity-provider": "^3.1108.0",
-    "@aws-sdk/client-dynamodb": "^3.1108.0"
+    "@aws-sdk/client-bedrock-agentcore": "^3.1118.0",
+    "@aws-sdk/client-cognito-identity-provider": "^3.1118.0",
+    "@aws-sdk/client-dynamodb": "^3.1118.0"
   },
   "devDependencies": {
     "@dotenvx/dotenvx": "^2.21.0",
-    "@types/aws-lambda": "^8.10.149",
+    "@types/aws-lambda": "^8.10.162",
     "@types/node": "^25.6.0",
     "tsup": "^8.5.0",
-    "tsx": "^4.21.0",
+    "tsx": "^4.23.12",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.11"
   }
 }

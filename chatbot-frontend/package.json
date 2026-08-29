@@ -12,24 +12,24 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@aws-amplify/auth": "^6.19.1",
-    "aws-amplify": "^6.16.4",
+    "@aws-amplify/auth": "^6.20.0",
+    "aws-amplify": "^6.20.0",
     "lucide-react": "^0.575.0",
     "qrcode-generator": "2.0.4",
-    "react": "^19.2.0",
-    "react-dom": "^19.2.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
-    "@tailwindcss/vite": "^4.2.1",
+    "@tailwindcss/vite": "^4.3.3",
     "@types/node": "^25.6.0",
-    "@types/react": "^19.2.0",
-    "@types/react-dom": "^19.2.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.5",
     "@vitejs/plugin-react": "^5.0.4",
     "tailwindcss": "^4.2.1",
     "typescript": "^7.0.2",
     "vite": "^7.3.1",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.11"
   }
 }
