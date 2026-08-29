@@ -27,7 +27,7 @@
     "constructs": "^10.6.0"
   },
   "devDependencies": {
-    "@dotenvx/dotenvx": "^1.61.1",
+    "@dotenvx/dotenvx": "^2.21.0",
     "@types/node": "^25.6.0",
     "aws-cdk": "^2.1135.1",
     "tsx": "^4.21.0",
