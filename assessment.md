@@ -1,7 +1,8 @@
 # Assessment Técnico — `aws-agentic-app-starter`
 
 **Escopo:** avaliação independente da engenharia do template, desconsiderando o domínio da aplicação.
-**Data:** 2026-08-28 · **Commit avaliado:** `6ca67f3` (branch `feat/assessment`, árvore limpa)
+**Data:** 2026-08-29 · **Commit avaliado:** `c2d05ae` (branch `feat/pilot-enabler`, árvore limpa)
+**Emissão original:** 2026-08-28 sobre `6ca67f3` — ver §10 para o que mudou entre as duas.
 **Objetivo:** determinar se o template está pronto para acelerar (1) demos, (2) pilotos fechados
 inclusive com dados sensíveis, e (3) aplicações públicas em produção.
 
@@ -11,38 +12,44 @@ inclusive com dados sensíveis, e (3) aplicações públicas em produção.
 
 Este é um template acima da média da categoria. A engenharia é deliberada: as decisões de segurança
 não estão apenas documentadas — estão **asseguradas por testes contra o template sintetizado**, o que
-é raro. O *deployment profile gate* (`infra/src/config.ts:173`) é uma ideia genuinamente boa e bem
+é raro. O *deployment profile gate* (`infra/src/config.ts`) é uma ideia genuinamente boa e bem
 executada: transforma comentários de README em uma build que se recusa a sintetizar.
 
-O que o template **não** tem é a camada operacional que separa "um sistema que funciona" de "um
-sistema que se opera": não há tracing, não há métricas de negócio ou de custo por usuário, não há
-pipeline de deploy, não há guardrails de conteúdo do Bedrock, e o estado conversacional vive na
-memória do contêiner.
+Desde a emissão original (§10), o template **fechou a maior parte da lacuna de nível 2**: agora há
+guardrail de conteúdo do Bedrock, tracing distribuído com correlation ID fim a fim, criptografia com
+CMK própria em todos os stores, e estado conversacional durável em AgentCore Memory com retenção e
+isolamento por `actorId`. O gate de perfil passou de 6 para 9 regras, incorporando guardrail,
+tracing e retenção como *evidence posture*.
+
+O que **ainda** falta para separar "um sistema que funciona" de "um sistema que se opera com dados
+sensíveis" é mais estreito: isolamento de rede do runtime (VPC), pipeline de deploy, métricas de
+negócio/custo por usuário, e cobertura de teste dos handlers. Nenhum é o buraco largo que a primeira
+emissão descreveu.
 
 ### Veredito por nível
 
 | Nível | Prontidão | Nota | Síntese |
 |---|---|---|---|
 | **1. Demos** | ✅ **Pronto** | 5/5 | Um comando de deploy, defaults de sandbox coerentes, zero bloqueadores. |
-| **2. Pilotos fechados (dados sensíveis)** | ⚠️ **Condicionalmente pronto** | 3/5 | O gate de perfil cobre a postura de acesso; falta a camada de *evidência* (tracing, auditoria de conteúdo), isolamento de rede e guardrails de IA. |
-| **3. Produção pública** | ❌ **Não pronto** | 2/5 | Bloqueadores estruturais: sem CD, sem domínio/TLS próprio, WAF opcional, estado em memória, teto de 50 e-mails/dia do Cognito. |
+| **2. Pilotos fechados (dados sensíveis)** | ✅ **Pronto com condições** | 4/5 | O gate cobre acesso *e* evidência (tracing, retenção, guardrail obrigatórios); conteúdo é registrado com CMK. Restam: isolamento de rede do runtime, pipeline de deploy e testes de handler — endereçáveis antes ou logo após o go. |
+| **3. Produção pública** | ⚠️ **Parcialmente pronto** | 3/5 | Persistência resolvida. Restam: sem CD, sem domínio/TLS próprio, WAF opcional, sem SLO/dashboard, teto de 50 e-mails/dia do Cognito, sem DR. |
 
 ### Notas por dimensão
 
 | Dimensão | Nota | Comentário de uma linha |
 |---|---|---|
-| Arquitetura | 4,5/5 | Fronteira de confiança clara, coerente e (quase toda) testada. |
+| Arquitetura | 4,5/5 | Fronteira de confiança clara, coerente e (quase toda) testada; três Lambdas com privilégios separados sobre a memória. |
 | Qualidade de código | 4,5/5 | TS estrito, módulos puros separados de I/O, comentários que explicam o *porquê*. |
-| Testes e quality gates | 3,5/5 | 249 testes de altíssima qualidade — com buracos nomeáveis e nenhuma medição de cobertura. |
-| Segurança | 4,0/5 | IAM de menor privilégio real; falta criptografia com CMK, WAF obrigatório e isolamento de rede. |
-| Infraestrutura AWS | 4,0/5 | 100% IaC, dependências explícitas; sem VPC e sem estratégia multi-conta. |
-| Observabilidade | 2,0/5 | 3 alarmes e logs de acesso. Sem tracing, sem métricas, sem dashboard, sem correlação. |
-| Resiliência | 2,0/5 | Degradação elegante em dois pontos; sem retry, DLQ, concorrência reservada ou DR. |
-| Escalabilidade | 2,5/5 | Camada serverless escala; o agente não (estado em memória, evicção O(n)). |
+| Testes e quality gates | 4,0/5 | 319 testes de altíssima qualidade — restam handlers sem teste e nenhuma medição de cobertura. |
+| Segurança | 4,5/5 | IAM de menor privilégio real, agora com CMK própria em todos os stores; falta WAF obrigatório e isolamento de rede. |
+| Infraestrutura AWS | 4,0/5 | 100% IaC, dependências explícitas, KMS compartilhada entre stacks; sem VPC e sem estratégia multi-conta. |
+| Observabilidade | 3,5/5 | X-Ray nas 3 Lambdas + stage, OTel no agente, correlation ID fim a fim, log estruturado. Falta dashboard, SLO e métricas de negócio. |
+| Resiliência | 3,0/5 | Estado conversacional agora durável (AgentCore Memory); teto de contexto por sessão. Falta retry, DLQ, concorrência reservada, DR. |
+| Escalabilidade | 3,0/5 | Camada serverless escala; o agente já não guarda estado em memória, mas mantém afinidade de sessão do AgentCore. |
 | Desempenho | 3,5/5 | Streaming fim a fim e decisões de pooling corretas; nada é medido. |
 | CI/CD | 2,5/5 | CI exemplar em higiene de supply chain; CD inexistente; sem governança de repositório. |
-| Governança de IA | 2,0/5 | Excelente no controle de identidade; ausente em conteúdo, avaliação e auditoria. |
-| Otimização de custos | 3,0/5 | Bons tetos preventivos; nenhuma instrumentação de consumo real. |
+| Governança de IA | 3,5/5 | Controle de identidade forte + guardrail (conteúdo/PII/prompt-attack) + registro auditável de conteúdo. Falta eval suite e versionamento de prompt. |
+| Otimização de custos | 3,5/5 | Bons tetos preventivos + teto de contexto por sessão; ainda sem instrumentação de consumo real (tokens/custo por `sub`). |
 
 ---
 
@@ -54,12 +61,13 @@ execução real:
 
 | Verificação executada | Resultado |
 |---|---|
-| `npm run verify` (lint + typecheck + test) | ✅ **Exit 0** — 249 testes em 20 arquivos, todos passando |
-| `npm run audit` (`--audit-level=high`) | ✅ **Exit 0** — 1 vulnerabilidade *low* (esbuild, dev-only, Windows) |
-| Síntese CloudFormation de `auth`, `bff`, `frontend` | ✅ 58 recursos gerados, inspecionados propriedade a propriedade |
+| `npm run verify` (lint + typecheck + test) | ✅ **Exit 0** — 319 testes, todos passando |
+| `npm run audit` (`--audit-level=high`) | ✅ **Exit 0** — 1 vulnerabilidade *low* (esbuild, dev-only, Windows); moderadas abaixo do gate |
+| Síntese CloudFormation de `auth`, `bff`, `frontend` | ✅ recursos gerados, inspecionados propriedade a propriedade |
 | Inventário de propriedades de hardening no template sintetizado | Ver §6.6 |
 
-Distribuição dos testes: `infra` 79 · `chatbot-frontend` 79 · `chatbot-bff` 63 · `agent` 28.
+Distribuição dos testes (HEAD `c2d05ae`): `infra` 97 · `chatbot-frontend` 79 · `chatbot-bff` 107 ·
+`agent` 36.
 
 > **Nota metodológica:** o `AgentStack` não é sintetizável sem um `docker build` real, portanto suas
 > propriedades foram avaliadas por leitura de código, não por inspeção de template. Isso é uma
@@ -110,17 +118,25 @@ de zero a uma aplicação agêntica autenticada, com streaming e painel administ
 
 ## 4. Veredito nível 2 — Pilotos fechados, inclusive com dados sensíveis
 
-### Prontidão: ⚠️ **Condicionalmente pronto** (3/5)
+### Prontidão: ✅ **Pronto com condições** (4/5)
 
-O template **entende** o problema de piloto melhor que a maioria — o gate de perfil é a prova. O que
-falta não é postura de acesso, é **capacidade de evidenciar e conter**: um piloto com dados sensíveis
-precisa responder "quem viu o quê, quando, e o que o agente respondeu", e o template deliberadamente
-não guarda essa informação.
+O template **entende** o problema de piloto melhor que a maioria — o gate de perfil é a prova — e
+desde a emissão original passou a **implementar** a camada que faltava. A postura de *evidência* que
+a primeira versão apontava como ausente agora existe e é cobrada pelo gate: um piloto com dados
+sensíveis consegue responder "o que o agente respondeu" (AgentCore Memory), "por quanto tempo isso é
+guardado" (`CONVERSATION_RETENTION_DAYS`, obrigatório) e "qual turno o usuário está reclamando"
+(correlation ID fim a fim que alcança o turno gravado).
+
+O que resta para um "go" limpo não é mais uma lacuna de capacidade — é **isolamento de rede do
+runtime** (VPC), **um caminho de deploy auditável** e **cobertura de teste dos handlers**. Os três
+são endereçáveis; nenhum é o buraco largo da primeira emissão.
 
 ### Evidências positivas
 
-**O gate de perfil faz trabalho real** (`infra/src/config.ts:173-223`). Com `DEPLOY_PROFILE=pilot`,
-`cdk synth` falha antes de qualquer recurso ser descrito, listando **todas** as violações de uma vez:
+**O gate de perfil faz trabalho real** (`infra/src/config.ts`, `assertDeploymentPosture`). Com
+`DEPLOY_PROFILE=pilot`, `cdk synth` falha antes de qualquer recurso ser descrito, listando **todas**
+as violações de uma vez. São **nove** regras agora — as seis originais de *access posture* mais três
+de *evidence posture* acrescentadas desde a emissão original:
 
 - `PUBLIC_SIGNUP_ENABLED` deve ser `false`
 - `ALLOWED_ORIGIN` não pode ser `*`
@@ -128,6 +144,12 @@ não guarda essa informação.
 - `COGNITO_MFA` deve ser `required`
 - `COGNITO_THREAT_PROTECTION` não pode ser `off`
 - `RETAIN_DATA` deve ser `true`
+- `GUARDRAIL_ENABLED` deve ser `true` — nada mais no stack inspeciona conteúdo, redige PII ou
+  reconhece prompt injection *(novo)*
+- `TRACING_ENABLED` deve ser `true` — uma resposta errada tem de ser reconstruível pelos três
+  runtimes *(novo)*
+- `CONVERSATION_RETENTION_DAYS` deve estar setado — conversas são gravadas, então por quanto tempo é
+  uma decisão que alguém tem de tomar *(novo)*
 
 E `assertDeploymentTarget` (`infra/src/config.ts:119`) exige `DEPLOY_ACCOUNT`/`DEPLOY_REGION` sob
 `pilot`/`prod`, falhando se as credenciais ambientes resolverem para outra conta. Ambos têm cobertura
@@ -174,19 +196,32 @@ de auditoria carrega apenas ator/ação/alvo, com comentário explicando a decis
 `javascript:`. Mensagens do usuário são renderizadas como texto puro, por decisão documentada. Isso
 fecha o vetor XSS mais comum em apps agênticos.
 
-### 🔴 Riscos e bloqueadores
+### ✅ Bloqueadores resolvidos desde a emissão original
+
+Estes eram os bloqueadores da primeira versão. Foram fechados no commit `3ee31cb`
+(*"make conversations durable, guarded and traceable"*) e verificados no HEAD:
+
+| # | Risco original | Como foi resolvido | Evidência |
+|---|---|---|---|
+| **B1** | Nenhum Bedrock Guardrail | `createGuardrail` cria filtros de conteúdo (SEXUAL/VIOLENCE/HATE HIGH, INSULTS/MISCONDUCT MEDIUM), `PROMPT_ATTACK` input-only, e PII `ANONYMIZE` em 9 entidades — **obrigatório sob `pilot`/`prod`** pelo gate. Versão numerada e imutável, pinada pelo runtime. | `agent-stack.ts` `createGuardrail`; `config.ts` regra `GUARDRAIL_ENABLED` |
+| **B3** | Nenhum registro do que o agente respondeu | Conversas gravadas em **AgentCore Memory** (`CfnMemory`), com `eventExpiryDuration = CONVERSATION_RETENTION_DAYS` e `encryptionKeyArn` na CMK. Isolamento por `actorId` derivado do namespace da sessão. Um evento por turno; PII já anonimizada é o que se grava. | `agent-stack.ts` `ConversationMemory`; `agent/src/memory.ts` |
+| **B4** | Zero tracing distribuído | `TRACING_ENABLED` **obrigatório sob `pilot`/`prod`**: `lambda.Tracing.ACTIVE` nas três Lambdas e `tracingEnabled` no stage. `agent/src/telemetry.ts` registra o provider OTel do SDK. **Correlation ID fim a fim**: minted no browser (`X-Correlation-Id`), propagado como baggage W3C ao runtime e gravado no turno. | `bff-stack.ts` `tracing`; `config.ts` regra `TRACING_ENABLED`; `agent/src/telemetry.ts` |
+| **B5** | Nenhuma criptografia com CMK | `kms.Key` própria (`DataKey`) criada no `AgentStack` e compartilhada com o `BffStack`: tabelas DynamoDB `CUSTOMER_MANAGED`, log groups com `encryptionKey`, tópico SNS com `masterKey`, memória e guardrail com a mesma chave. Políticas de chave escopadas por serviço e por conta. | `agent-stack.ts` `DataKey`; `bff-stack.ts` `encryptionKey` |
+
+O bloqueador **P1 de nível 3** (estado conversacional na memória do contêiner) também foi resolvido
+pela mesma mudança: o histórico agora é durável, sobrevive a restart, é isolado por `actorId` e tem
+teto de contexto por sessão (`MAX_REPLAYED_MESSAGES = 40`), o que endereça parcialmente o custo
+superlinear apontado em §5.
+
+### 🔴 Riscos e bloqueadores remanescentes
 
 | # | Risco | Sev. | Evidência |
 |---|---|---|---|
-| **B1** | **Nenhum Bedrock Guardrail configurado.** Não há filtro de conteúdo, detecção/redação de PII, tópicos negados nem detecção de prompt-attack em lugar algum do repositório. A palavra "guardrails" no `README.md:21` refere-se a controles *operacionais* (retenção, alarmes, budget, throttling, WAF) — a enumeração é honesta, mas convida à leitura errada. | **Crítica** | `grep -ri guardrail` retorna apenas `infra/app.ts:67` (comentário de seção) e prosa do README |
-| **B2** | **Runtime AgentCore em `networkMode: 'PUBLIC'`** — sem VPC, sem subnets privadas, sem VPC endpoints, sem controle de egresso. Um contêiner comprometido tem saída irrestrita para a internet. | **Alta** | `agent-stack.ts:180-182` |
-| **B3** | **Nenhum registro do que o agente respondeu.** O histórico vive na memória do contêiner e é perdido no restart (`agent/src/index.ts:9-22`). Não há log, tabela ou stream do conteúdo. Para um piloto regulado, "não guardamos nada" costuma ser inaceitável tanto quanto "guardamos tudo sem controle". | **Alta** | `agent/src/index.ts:13-15` |
-| **B4** | **Zero tracing distribuído.** `TracingConfig` ausente em todas as Lambdas no template sintetizado; a role do runtime **tem** permissões X-Ray (`agent-stack.ts:113-122`) mas nada as usa. Não há correlation ID propagado browser → BFF → agente. Diagnosticar uma resposta errada em piloto é impossível. | **Alta** | Síntese: `grep -c TracingConfig` = 0 |
-| **B5** | **Nenhuma criptografia com chave gerenciada pelo cliente (CMK).** Log groups, tabela DynamoDB e tópico SNS usam chaves AWS-owned/managed. O tópico SNS de alarmes está sem criptografia em repouso. | **Média** | Síntese: `KmsKeyId`, `KmsMasterKeyId`, `SSESpecification` = 0 ocorrências |
-| **B6** | **WAF opcional mesmo em `prod`.** É a única camada que filtra **antes** da autenticação; o throttle de stage não diz *quem* gastou e a cota por usuário só age depois do login. A decisão de deixá-lo opcional é justificada por custo (`config.ts:86-91`) e é defensável — mas o gate não força sequer uma escolha explícita. | **Média** | `config.ts:92`, `stacks.test.ts:586` |
-| **B7** | **Deploy manual, da máquina do desenvolvedor, com credenciais ambientes.** Não há pipeline, aprovação, ou segregação de funções. `npm run deploy:no-approval` existe e ignora o gate de aprovação de IAM. | **Média** | `infra/package.json:19-20` |
-| **B8** | **Refresh token de 30 dias sem processo de revogação documentado.** Combinado com a nota do `infra/README.md` de que uma mudança de grupo só chega no próximo token, o janelamento de revogação efetiva é longo para dados sensíveis. | **Média** | `auth-stack.ts:236-238` |
-| **B9** | **Sem versionamento nem access logging no bucket S3, e sem access logs do CloudFront.** Não há trilha de quem acessou o frontend. | **Baixa** | Síntese: `VersioningConfiguration`, `Logging` = 0 |
+| **B2** | **Runtime AgentCore em `networkMode: 'PUBLIC'`** — sem VPC, sem subnets privadas, sem VPC endpoints, sem controle de egresso. Um contêiner comprometido tem saída irrestrita para a internet. É o único bloqueador *estrutural* remanescente do nível 2. O `README.md` agora nomeia isso explicitamente ("The agent runtime has no VPC"). | **Alta** | `agent-stack.ts` `networkConfiguration: { networkMode: 'PUBLIC' }` |
+| **B6** | **WAF opcional em todos os perfis, e fora do gate.** É a única camada que filtra **antes** da autenticação. A implementação melhorou (4 managed rule groups + rate limit por IP, todas em `block`), mas `resolveWafEnabled` continua com default `false` e o gate não cobra sequer uma escolha explícita. | **Média** | `config.ts` `resolveWafEnabled`; `bff-stack.ts` `attachWebAcl` |
+| **B7** | **Deploy manual, da máquina do desenvolvedor, com credenciais ambientes.** Não há pipeline, aprovação ou segregação de funções. `npm run deploy:no-approval` existe. O CI **explicitamente não roda `cdk synth`** (mantém a fronteira de credenciais), então uma quebra do gate de perfil ainda passa no CI. | **Média** | `.github/workflows/ci.yml`; `infra/package.json` `deploy:no-approval` |
+| **B8** | **Refresh token de 30 dias sem processo de revogação documentado.** Combinado com a nota de que uma mudança de grupo só chega no próximo token, o janelamento de revogação efetiva é longo para dados sensíveis. Inalterado. | **Média** | `auth-stack.ts:238` `refreshTokenValidity: Duration.days(30)` |
+| **B9** | **Sem versionamento nem access logging no bucket S3, e sem access logs do CloudFront.** Não há trilha de quem acessou o frontend. Inalterado. | **Baixa** | `frontend-stack.ts` — sem `VersioningConfiguration` nem `serverAccessLogs` |
 
 ### Lacunas de teste relevantes para este nível
 
@@ -205,35 +240,39 @@ fecha o vetor XSS mais comum em apps agênticos.
 
 ### Ações recomendadas — nível 2, por criticidade
 
+As ações P0 da emissão original (guardrail, tracing + correlation ID, política de retenção, CMK) já
+foram executadas. O que resta:
+
 | Prio | Ação | Esforço |
 |---|---|---|
-| **P0** | Adicionar um **Bedrock Guardrail** (filtros de conteúdo + detecção de PII + prompt-attack) como recurso CDK opcional, e torná-lo **obrigatório sob `pilot`/`prod`** no `assertDeploymentPosture`. | M |
-| **P0** | Habilitar **X-Ray** (`tracing: lambda.Tracing.ACTIVE`) nas três Lambdas e no stage do API Gateway; instrumentar o contêiner do agente com ADOT/OTel para que as permissões já concedidas passem a ser usadas. Propagar um correlation ID do browser ao agente. | M |
-| **P1** | Definir a política de retenção de conteúdo conversacional: ou persistir com criptografia CMK + retenção declarada, ou documentar formalmente a ausência como decisão de privacidade. Hoje é um vazio, não uma escolha. | M |
-| **P1** | Mover o runtime AgentCore para VPC com subnets privadas, NAT controlado e VPC endpoints para Bedrock/DynamoDB/Cognito. | M |
-| **P1** | Testar os handlers: fail-closed sem claims, bypass do rate limit com tabela ausente, caminho OPTIONS/405, e o `custom-message` completo. | M |
-| **P1** | Adicionar CMK para log groups, DynamoDB e SNS; habilitar criptografia do tópico de alarmes. | S |
-| **P1** | Exigir `WAF_ENABLED=true` sob `pilot`/`prod` — ou, no mínimo, transformá-lo numa escolha explícita que o gate cobra (aceitar `false` apenas se declarado). | S |
-| **P1** | Substituir o deploy manual por pipeline com OIDC (sem chaves de longa duração), `cdk diff` obrigatório em PR e aprovação para `pilot`/`prod`. Ver §6. | M |
-| **P2** | Habilitar versionamento e access logging no bucket S3, e access logs no CloudFront. | S |
+| **P0** | Mover o runtime AgentCore para VPC com subnets privadas, NAT controlado e VPC endpoints para Bedrock/DynamoDB/Cognito — o único bloqueador estrutural remanescente (B2). | M |
+| **P1** | Testar os handlers: fail-closed sem claims, bypass do rate limit com tabela ausente, caminho OPTIONS/405, e o `custom-message` completo. `handler.ts`, `admin-handler.ts` e `conversations-handler.ts` continuam sem teste de handler — só seus auxiliares puros. | M |
+| **P1** | Exigir `WAF_ENABLED=true` sob `pilot`/`prod` — ou, no mínimo, transformá-lo numa escolha explícita que o gate cobra (B6). | S |
+| **P1** | Substituir o deploy manual por pipeline com OIDC (sem chaves de longa duração), `cdk diff` obrigatório em PR e aprovação para `pilot`/`prod` (B7). Ver §6. | M |
+| **P2** | Habilitar versionamento e access logging no bucket S3, e access logs no CloudFront (B9). | S |
 | **P2** | Medir cobertura (`vitest --coverage`) e definir um piso no CI. | S |
-| **P2** | Reduzir a validade do refresh token sob `pilot`/`prod` e documentar o procedimento de revogação (`admin-user-global-sign-out`). | XS |
+| **P2** | Reduzir a validade do refresh token sob `pilot`/`prod` e documentar o procedimento de revogação (`admin-user-global-sign-out`) (B8). | XS |
+| **P2** | Rodar `cdk synth` (dos três stacks sintetizáveis) no CI, para que uma quebra do gate de perfil não passe. | S |
 
 ---
 
 ## 5. Veredito nível 3 — Aplicações públicas em produção
 
-### Prontidão: ❌ **Não pronto** (2/5)
+### Prontidão: ⚠️ **Parcialmente pronto** (3/5)
 
 O template não afirma estar pronto para isso — o `README.md` é explícito ("é andaime, não um produto
-acabado") e nomeia duas decisões deixadas em aberto. A avaliação abaixo confirma essa autoavaliação e
-a estende: as lacunas são mais amplas do que as duas declaradas.
+acabado"). Desde a emissão original, o bloqueador de maior impacto (estado conversacional em memória)
+foi resolvido, o que sobe a nota. As lacunas remanescentes são de operação em escala pública, não de
+correção funcional.
 
 ### 🔴 Bloqueadores estruturais
 
+O bloqueador **P1 original — estado conversacional na memória do contêiner — foi RESOLVIDO**: o
+histórico vive agora em AgentCore Memory, durável entre restarts e réplicas, isolado por `actorId` e
+com teto de contexto por sessão (`agent/src/memory.ts`). Os demais permanecem:
+
 | # | Bloqueador | Por que bloqueia | Evidência |
 |---|---|---|---|
-| **P1** | **Estado conversacional na memória do contêiner.** Perdido em restart, não compartilhado entre réplicas. Com múltiplas réplicas, a continuidade da conversa depende de afinidade de sessão do AgentCore. | Um usuário público perde o contexto sem aviso a cada reciclagem de contêiner | `agent/src/index.ts:9-22` (declarado no README) |
 | **P2** | **Sem CD.** Não há workflow de deploy, role OIDC, ambientes protegidos, promoção entre contas, `cdk diff` em PR, detecção de drift ou procedimento de rollback. | Produção pública exige deploy auditável e reversível | `.github/workflows/` contém apenas `ci.yml` |
 | **P3** | **Sem domínio próprio nem certificado ACM.** A app serve de `*.cloudfront.net` com o certificado default do CloudFront — cujo piso de protocolo é TLSv1. | Problema de marca, de phishing e de conformidade TLS | Síntese: `ViewerCertificate` e `MinimumProtocolVersion` ausentes |
 | **P4** | **Teto de 50 e-mails/dia do mailer default do Cognito.** SES não está conectado (exige domínio verificado + saída do sandbox). | Onboarding público trava no primeiro dia | Documentado em `infra/README.md`, seção "Emails" |
@@ -247,16 +286,19 @@ a estende: as lacunas são mais amplas do que as duas declaradas.
 
 ### Riscos adicionais de escala e custo
 
-- **Contexto cresce sem limite dentro de uma sessão.** Não há teto de turnos nem de tokens por
-  conversa. Com TTL de 30 minutos e cota de 20 req/min, uma sessão pode acumular contexto muito
-  grande — e cada turno reenvia o contexto inteiro, tornando o custo **superlinear por sessão**.
-  Não há métrica que revele isso acontecendo.
-- **`evictStaleSessions()` é O(n) sobre todo o mapa a cada requisição** (`agent/src/index.ts:17-22`).
-  Com muitas sessões ativas por contêiner, isso vira trabalho por requisição proporcional ao número de
-  sessões.
-- **Sem telemetria de tokens ou atribuição de custo.** `cloudwatch:PutMetricData` é concedido ao
-  runtime (`agent-stack.ts:123-133`) e nunca chamado. Não é possível responder "qual usuário gastou o
-  orçamento" nem "quanto custa uma conversa".
+- **Contexto por sessão agora tem teto — parcial.** `MAX_REPLAYED_MESSAGES = 40`
+  (`agent/src/memory.ts`) limita quantas mensagens passadas são reenviadas a cada turno, o que bounda
+  o custo superlinear que a emissão original apontava. É um teto, não um sumarizador: além dele os
+  turnos mais antigos deixam de ser vistos pelo modelo (mas continuam na memória e no transcript). Um
+  teto por *tokens* e sumarização de contexto ainda não existem, e nenhuma métrica revela quando o
+  teto é atingido.
+- **`evictStaleSessions()` O(n)** deixou de ser um problema no caminho quente: o estado por contêiner
+  foi substituído por AgentCore Memory (`agent/src/index.ts` reescrito).
+- **Sem telemetria de tokens ou atribuição de custo.** `cloudwatch:PutMetricData` continua concedido
+  ao runtime; `agent/src/telemetry.ts` registra o provider OTel do SDK Strands, mas ele só exporta
+  quando `OTEL_EXPORTER_OTLP_ENDPOINT` aponta para um collector — que o template não provê. Sem esse
+  collector, ainda não é possível responder "qual usuário gastou o orçamento" nem "quanto custa uma
+  conversa" a partir de métricas de negócio/EMF.
 - **O budget mede a conta inteira, não o projeto** — apesar de se chamar `${projectName}-monthly`.
   Não há `costFilters` no `CfnBudget` (`bff-stack.ts`). Em conta dedicada — que é para onde
   `DEPLOY_ACCOUNT` empurra um piloto — dá no mesmo; em conta compartilhada, um teto abaixo do que a
@@ -279,11 +321,11 @@ a estende: as lacunas são mais amplas do que as duas declaradas.
 
 | Prio | Ação | Esforço |
 |---|---|---|
-| **P0** | Substituir o armazenamento de sessão em memória pelo `SessionManager` do Strands SDK sobre store persistente (DynamoDB), com criptografia e retenção declaradas. | M |
+| **✅ feito** | ~~Substituir o armazenamento de sessão em memória por store persistente~~ — resolvido via AgentCore Memory (`agent/src/memory.ts`), com CMK e retenção declaradas. | — |
 | **P0** | Construir o pipeline de CD: OIDC, `cdk diff` em PR, ambientes protegidos, promoção dev→stage→prod, rollback documentado. Considerar CDK Pipelines. | L |
 | **P0** | Domínio próprio + certificado ACM + `MinimumProtocolVersion: TLSv1.2_2021`; WAF também no CloudFront. | M |
 | **P0** | Conectar SES (identidade de domínio verificada, DKIM, saída do sandbox) — o caminho já está documentado em `infra/README.md`. | M |
-| **P0** | Guardrails do Bedrock **obrigatórios** + moderação de saída (herda de B1, §4). | M |
+| **✅ feito** | ~~Guardrails do Bedrock obrigatórios~~ — resolvido (B1). Falta ainda **moderação de saída** dedicada além do guardrail. | — |
 | **P1** | Retry com backoff exponencial e jitter na chamada ao AgentCore; tratar `ThrottlingException` do Bedrock distintamente de erro genérico. | S |
 | **P1** | Concorrência reservada nas Lambdas; DLQ onde aplicável. | S |
 | **P1** | Dashboard CloudWatch + SLOs + alarmes de latência (p99), throttles, erros do Bedrock e taxa de rejeição de cota. | M |
@@ -357,10 +399,13 @@ importar.
 | Sem limite de caracteres no cliente correspondente ao servidor | `http.ts:80` |
 | `local.ts` duplica o laço de streaming do `handler.ts` em vez de compartilhá-lo | `local.ts:83-113` |
 
-### 6.3 Testes e quality gates — 3,5/5
+### 6.3 Testes e quality gates — 4,0/5
 
-**249 testes, todos passando**, ~28% do LOC total. A qualidade é excepcional: os testes asseguram
-*invariantes com o modo de falha declarado*, não implementação. Destaques:
+**319 testes, todos passando** (infra 97 · frontend 79 · bff 107 · agent 36). A qualidade permanece
+excepcional: os testes asseguram *invariantes com o modo de falha declarado*, não implementação. Os
+novos cobrem a separação de privilégios entre as três Lambdas sobre a memória, o wire-format do
+correlation id, a durabilidade condicional (`memory.test.ts`) e as regras de gate acrescentadas.
+Destaques originais mantidos:
 
 - `gates every method on the API behind the Cognito authorizer` (`stacks.test.ts:382`) **enumera**
   todos os métodos do template em vez de listar rotas conhecidas — uma rota nova nasce coberta.
@@ -391,10 +436,12 @@ bucket privado, auditoria estruturada incluindo negativas, e supply chain de CI 
 (actions fixadas por SHA, `persist-credentials: false`, `permissions: contents: read`, timeout,
 audit gate em `high` — com a justificativa correta de por que `critical` seria insuficiente).
 
-**Ausentes**: guardrails de conteúdo, CMK, isolamento de rede, WAF obrigatório, TLS mínimo, scanning
+**Ausentes**: WAF obrigatório, isolamento de rede, TLS mínimo, scanning
 de imagem (ECR scan-on-push não habilitado), SBOM, scanning de IaC (cdk-nag),
 `PublicAccessBlockConfiguration` fixado no bucket (ausência deliberada e documentada em
-`frontend-stack.ts:58-59` por conta de SCPs — mas o controle não fica no template).
+`frontend-stack.ts` por conta de SCPs — mas o controle não fica no template). **Guardrails de
+conteúdo e CMK deixaram de estar ausentes** (ver B1/B5): há guardrail obrigatório sob `pilot`/`prod`
+e uma CMK própria criptografando conversas, tabelas, logs e o tópico de alarmes.
 
 Nota: `NODE_TLS_REJECT_UNAUTHORIZED=0` aparece comentado em dois `.env.example`, com avisos fortes e
 corretos sobre o escopo de processo inteiro. Aceitável, mas presente.
@@ -408,38 +455,41 @@ justificativa correta de que são contadores descartáveis). O split de `cache-c
 
 Faltam: VPC, endpoints e uma estratégia multi-conta.
 
-### 6.6 Observabilidade — 2,0/5
+### 6.6 Observabilidade — 3,5/5
 
-**Presente:** 3 alarmes CloudWatch com tópico SNS; access logs do API Gateway com `requestId`,
-`sub`, status, latência e IP, sem corpo; retenção de 30 dias em todos os log groups (com a
-justificativa de que 7 dias não sobrevive a um incidente descoberto depois de um fim de semana);
-auditoria JSON estruturada nas rotas admin.
+**Presente:** X-Ray nas três Lambdas e no stage do API Gateway (sob `TRACING_ENABLED`, obrigatório em
+`pilot`/`prod`); provider OTel registrado no contêiner do agente (`agent/src/telemetry.ts`);
+**correlation ID fim a fim** — minted no browser (`X-Correlation-Id`), propagado como baggage W3C na
+invocação do runtime, e gravado no turno em AgentCore Memory, de modo que o id que um usuário cita
+localiza o exato exchange; log estruturado JSON no caminho de chat (`logEvent`, `handler.ts`); 3
+alarmes CloudWatch com tópico SNS criptografado; access logs do API Gateway (identidade e resultado,
+sem corpo); retenção de 30 dias em todos os log groups; auditoria JSON estruturada nas rotas admin.
 
-**Ausente** — confirmado por inspeção do template sintetizado:
+**Ainda ausente:**
 
-| Propriedade | Ocorrências na síntese |
+| Propriedade | Estado |
 |---|---|
-| `TracingConfig` (X-Ray nas Lambdas) | 0 |
-| `TracingEnabled` (X-Ray no stage) | 0 |
-| `ContributorInsights` | 0 |
 | Dashboard CloudWatch | 0 recursos |
-| Métricas customizadas / EMF | 0 chamadas no código |
+| Métricas de negócio / EMF (tokens, custo por `sub`, invocações por ferramenta) | não emitidas — o provider OTel só exporta com `OTEL_EXPORTER_OTLP_ENDPOINT` + collector externo |
+| Alarmes de latência / throttle / erro de Bedrock / rejeição de cota | ausentes (os 3 alarmes são todos de erro) |
+| SLO declarado | ausente |
 
-Somando: sem tracing, sem dashboard, sem métricas de negócio, sem correlation ID, sem log
-estruturado no caminho de chat (apenas `console.error` cru — `handler.ts:151`), sem métricas de
-tokens ou de invocação de ferramenta, sem alarmes de latência/throttle/Bedrock. **Esta é a dimensão
-mais fraca junto com governança de IA, e é a que mais separa o nível 2 do nível 1.**
+O tracing e o correlation ID fecham o que mais separava o nível 2 do nível 1 na emissão original. O
+que resta é a camada de *operação contra um objetivo* (dashboard, SLO, métricas de negócio) — mais
+relevante para produção pública que para um piloto fechado.
 
-### 6.7 Resiliência — 2,0/5
+### 6.7 Resiliência — 3,0/5
 
-**Presente:** o trigger `CustomMessage` nunca lança, degradando para o template plain-text em vez de
-bloquear o sign-up (`index.mjs:90-94`) — decisão correta e bem justificada; o convite admin cai para
-o caminho sem atributo de locale se o pool não o tiver (`admin-handler.ts:143-158`); o parser de
-stream ignora eventos desconhecidos em vez de falhar; `complete()` é idempotente
-(`stream-parser.ts:114-123`); evicção por TTL das sessões.
+**Presente:** **estado conversacional durável** em AgentCore Memory — o item de maior impacto da
+emissão original, agora resolvido: o histórico sobrevive a restart e é compartilhado entre réplicas
+por `actorId`, não mais preso a um `Map` de contêiner; o trigger `CustomMessage` nunca lança,
+degradando para o template plain-text (`index.mjs`); o convite admin cai para o caminho sem atributo
+de locale se o pool não o tiver; o parser de stream ignora eventos desconhecidos; `complete()` é
+idempotente; a memória degrada para "sem histórico" (não falha) quando `AGENTCORE_MEMORY_ID` está
+ausente.
 
 **Ausente:** retry/backoff, circuit breaker, DLQ, concorrência reservada, `SIGTERM`, `HEALTHCHECK`,
-DR, idempotência de retry, e — o item de maior impacto — persistência do estado conversacional.
+DR, e idempotência de retry.
 
 ### 6.8 Escalabilidade — 2,5/5
 
@@ -479,64 +529,67 @@ uma alteração que quebre a síntese no `app.ts`, onde vive o gate de perfil, p
 do workflow justifica isso como fronteira de credenciais; a justificativa vale para o `AgentStack`
 (build Docker real), mas os outros três stacks sintetizariam sem credenciais.
 
-### 6.11 Governança de IA — 2,0/5
+### 6.11 Governança de IA — 3,5/5
 
 **Presente, e forte:** a regra "nenhuma tool aceita user id" asserida sobre todo o toolset; identidade
 apenas de claims verificadas; prompt do sistema instruindo o modelo a nunca aceitar afirmação de
-identidade vinda da conversa (`agent.ts:26-30`); `<thinking>` removido da saída visível
-(`stream-parser.ts:17-95`); modelo fixado por ID em um único lugar compartilhado entre configuração e
-IAM (`config.ts:358-367`); tetos de entrada em duas camadas (`http.ts:80` = 8.000 chars no BFF,
-`limits.ts:7` = 20.000 chars no runtime, com a justificativa de defesa em profundidade).
+identidade vinda da conversa; `<thinking>` removido da saída visível; modelo fixado por ID em um
+único lugar compartilhado entre configuração e IAM; tetos de entrada em duas camadas (8.000 chars no
+BFF, 20.000 no runtime). **Novidades desde a emissão original:** guardrail de conteúdo/PII/prompt-attack
+obrigatório sob `pilot`/`prod`, com PII anonimizada antes de gravar; **registro auditável do conteúdo
+conversacional** em AgentCore Memory com retenção declarada; **teto de contexto por conversa**
+(`MAX_REPLAYED_MESSAGES`).
 
-**Ausente:** guardrails de conteúdo/PII/prompt-attack, moderação de saída, eval suite, testes de
-regressão de comportamento, versionamento de prompt, procedimento de troca de modelo, registro
-auditável de prompts e respostas, human-in-the-loop para ações consequentes, política de retenção de
-conteúdo, model card / política de uso aceitável, teto de turnos por conversa.
+**Ausente:** moderação de saída dedicada (além do guardrail), eval suite, testes de regressão de
+comportamento, versionamento de prompt, procedimento de troca de modelo, human-in-the-loop para
+ações consequentes, model card / política de uso aceitável.
 
-### 6.12 Otimização de custos — 3,0/5
+### 6.12 Otimização de custos — 3,5/5
 
 **Presente:** Bedrock escopado a um modelo (fronteira de custo tanto quanto de segurança); throttle de
-stage; cota por usuário; tetos de entrada; budget opcional com alertas em 80% e 100%; ARM64 no agente;
-`PAY_PER_REQUEST`; `PriceClass_100`; o aviso de que threat protection move o pool para o plano Plus
-faturado por MAU — exatamente o tipo de alerta que templates omitem; e o teste
-`costs nothing and changes nothing when no profile is set` como garantia de que um upgrade do
-template não aparece como custo novo.
+stage; cota por usuário; tetos de entrada; **teto de contexto por sessão** (`MAX_REPLAYED_MESSAGES`,
+que bounda o custo superlinear apontado antes); budget opcional com alertas em 80% e 100%; ARM64 no
+agente; `PAY_PER_REQUEST`; `PriceClass_100`; tag `Project` em todo recurso taggável; o aviso de que
+threat protection move o pool para o plano Plus faturado por MAU; e o teste
+`costs nothing and changes nothing when no profile is set`.
 
-**Ausente:** telemetria de tokens, atribuição de custo por usuário/sessão, teto de turnos (custo
-superlinear por sessão), tags de alocação de custo (apenas o runtime tem tag), budget escopado,
-anomaly detection, concorrência reservada como teto de gasto de pior caso, e `arm64` nas Lambdas.
+**Ausente:** telemetria de tokens e atribuição de custo por usuário/sessão (o provider OTel existe
+mas exige collector externo), teto por *tokens*, budget escopado por tag, anomaly detection,
+concorrência reservada como teto de gasto de pior caso, e `arm64` nas Lambdas.
 
 ---
 
 ## 7. Backlog consolidado priorizado
 
-Ordenado por criticidade absoluta, atravessando os três níveis.
+Ordenado por criticidade absoluta, atravessando os três níveis. As linhas ✅ foram concluídas desde a
+emissão original e ficam aqui como registro.
 
 | # | Ação | Bloqueia nível | Dimensão | Esforço |
 |---|---|---|---|---|
-| 1 | Bedrock Guardrails (conteúdo + PII + prompt-attack), obrigatórios sob `pilot`/`prod` | 2, 3 | Governança de IA | M |
-| 2 | Tracing distribuído (X-Ray/OTel) + correlation ID fim a fim | 2, 3 | Observabilidade | M |
-| 3 | Persistir estado conversacional (`SessionManager` sobre DynamoDB) | 3 | Resiliência | M |
-| 4 | Pipeline de CD com OIDC, `cdk diff` em PR, ambientes protegidos, rollback | 2, 3 | CI/CD | L |
-| 5 | Testes dos handlers (fail-closed, bypass de rate limit, `custom-message`) | 2 | Testes | M |
-| 6 | Política de retenção de conteúdo conversacional (persistir com controle, ou declarar formalmente) | 2 | Governança de IA | M |
-| 7 | VPC + endpoints + controle de egresso para o runtime | 2 | Infra / Segurança | M |
-| 8 | Domínio próprio + ACM + `TLSv1.2_2021` + WAF no CloudFront | 3 | Segurança | M |
-| 9 | SES conectado (domínio verificado, DKIM, saída do sandbox) | 3 | Infra | M |
-| 10 | Métricas de negócio via EMF: tokens, custo por `sub`, invocações por ferramenta | 2, 3 | Observabilidade / Custos | M |
-| 11 | CMK para logs, DynamoDB e SNS | 2 | Segurança | S |
-| 12 | WAF obrigatório (ou escolha explícita cobrada) sob `pilot`/`prod` | 2 | Segurança | S |
-| 13 | Retry/backoff + tratamento de throttling do Bedrock | 3 | Resiliência | S |
-| 14 | Concorrência reservada + DLQ | 3 | Resiliência | S |
-| 15 | Dashboard + SLOs + alarmes de latência/throttle/Bedrock | 3 | Observabilidade | M |
-| 16 | Teto de turnos/tokens por sessão + truncamento de contexto | 3 | Custos | M |
-| 17 | Eval suite + versionamento do prompt do sistema | 3 | Governança de IA | L |
-| 18 | `LICENSE`, `SECURITY.md`, `CODEOWNERS`, template de PR | 1, 2 | Governança | S |
-| 19 | Cobertura medida com piso no CI; `cdk synth` no CI | 2 | Quality gates | S |
-| 20 | Decidir o escopo do budget: conta inteira (hoje) vs. tag `Project` ativada no Billing | 3 | Custos | S |
-| 21 | Versionamento e access logging no S3; access logs no CloudFront | 2 | Segurança | S |
-| 22 | Unificar contrato de erro em `/chat`; consumir `retryAfterSeconds` | 3 | Qualidade / UX | S |
-| 23 | `SIGTERM` + `HEALTHCHECK` no contêiner; Lambdas em `arm64` | 3 | Resiliência / Custos | XS |
+| ✅ | ~~Bedrock Guardrails (conteúdo + PII + prompt-attack), obrigatórios sob `pilot`/`prod`~~ | 2, 3 | Governança de IA | feito |
+| ✅ | ~~Tracing distribuído (X-Ray/OTel) + correlation ID fim a fim~~ | 2, 3 | Observabilidade | feito |
+| ✅ | ~~Persistir estado conversacional~~ — AgentCore Memory, isolado por `actorId`, CMK, retenção | 3 | Resiliência | feito |
+| ✅ | ~~Política de retenção de conteúdo conversacional~~ — `CONVERSATION_RETENTION_DAYS` cobrado pelo gate | 2 | Governança de IA | feito |
+| ✅ | ~~CMK para logs, DynamoDB e SNS~~ — uma chave própria compartilhada entre stacks | 2 | Segurança | feito |
+| 1 | VPC + endpoints + controle de egresso para o runtime (B2) | 2 | Infra / Segurança | M |
+| 2 | Pipeline de CD com OIDC, `cdk diff` em PR, ambientes protegidos, rollback (B7) | 2, 3 | CI/CD | L |
+| 3 | Testes dos handlers (fail-closed, bypass de rate limit, `custom-message`, conversations) | 2 | Testes | M |
+| 4 | WAF obrigatório (ou escolha explícita cobrada) sob `pilot`/`prod` (B6) | 2 | Segurança | S |
+| 5 | Domínio próprio + ACM + `TLSv1.2_2021` + WAF no CloudFront | 3 | Segurança | M |
+| 6 | SES conectado (domínio verificado, DKIM, saída do sandbox) | 3 | Infra | M |
+| 7 | Métricas de negócio via EMF: tokens, custo por `sub`, invocações por ferramenta (requer collector OTLP) | 2, 3 | Observabilidade / Custos | M |
+| 8 | Retry/backoff + tratamento de throttling do Bedrock | 3 | Resiliência | S |
+| 9 | Concorrência reservada + DLQ | 3 | Resiliência | S |
+| 10 | Dashboard + SLOs + alarmes de latência/throttle/Bedrock | 3 | Observabilidade | M |
+| 11 | Teto de tokens por sessão + sumarização de contexto (o teto de mensagens já existe) | 3 | Custos | M |
+| 12 | Eval suite + versionamento do prompt do sistema | 3 | Governança de IA | L |
+| 13 | `LICENSE`, `SECURITY.md`, `CODEOWNERS`, template de PR | 1, 2 | Governança | S |
+| 14 | Cobertura medida com piso no CI; `cdk synth` (dos 3 stacks sintetizáveis) no CI | 2 | Quality gates | S |
+| 15 | Decidir o escopo do budget: conta inteira (hoje) vs. tag `Project` ativada no Billing | 3 | Custos | S |
+| 16 | Versionamento e access logging no S3; access logs no CloudFront (B9) | 2 | Segurança | S |
+| 17 | Unificar contrato de erro em `/chat`; consumir `retryAfterSeconds` no frontend | 3 | Qualidade / UX | S |
+| 18 | Reduzir validade do refresh token sob `pilot`/`prod` + procedimento de revogação (B8) | 2 | Segurança | XS |
+| 19 | `SIGTERM` + `HEALTHCHECK` no contêiner; Lambdas em `arm64` | 3 | Resiliência / Custos | XS |
 
 ---
 
@@ -572,10 +625,21 @@ comparáveis:
   código e IaC.
 - **Nenhuma medição de desempenho ou custo** foi feita — as observações dessas dimensões são
   estruturais, não empíricas.
-- Este assessment reflete o commit `6ca67f3`, com a revisão registrada abaixo. As referências
-  `arquivo:linha` são válidas para esse estado da árvore.
+- Este assessment reflete o commit `c2d05ae` (branch `feat/pilot-enabler`), atualizado a partir da
+  emissão original sobre `6ca67f3`. O que mudou entre os dois está registrado em §10. As referências
+  a arquivos apontam para símbolos (funções, constructs) em vez de linhas, porque a árvore mudou
+  substancialmente entre as duas emissões.
 
-### Revisão — 2026-08-28
+### Verificação executada nesta revisão (HEAD `c2d05ae`)
+
+- `npm run verify` → **exit 0**, 319 testes passando (infra 97 · frontend 79 · bff 107 · agent 36).
+- `npm run audit` (`--audit-level=high`) → **exit 0**: 1 vulnerabilidade *low* (esbuild, dev-only,
+  Windows) e moderadas abaixo do gate.
+- Leitura de fonte confirmando o estado de cada bloqueador: `agent-stack.ts`, `bff-stack.ts`,
+  `config.ts`, `app.ts`, `auth-stack.ts`, `frontend-stack.ts`, `agent/src/memory.ts`,
+  `agent/src/telemetry.ts`, `chatbot-bff/src/handler.ts`.
+
+### Revisão — 2026-08-28 (sobre `6ca67f3`, emissão original)
 
 Dois apontamentos foram corrigidos no repositório após a primeira emissão e, por isso, não constam
 mais das seções acima:
@@ -589,4 +653,71 @@ mais das seções acima:
 | Sem Dependabot/Renovate — o gate de `npm audit` reportava sem nada mover as dependências | `.github/dependabot.yml` cobrindo os cinco `package.json` e as GitHub Actions, com minor/patch agrupados |
 | Escopo do budget não documentado: o recurso se chama `${projectName}-monthly` mas mede a conta inteira, e nem `.env.example` nem `infra/README.md` diziam isso | Escopo e sua consequência em conta compartilhada documentados nos dois arquivos e no `bff-stack.ts`, junto do porquê de não filtrar por tag |
 
-A contagem de testes nas seções acima (249) já reflete essa revisão.
+A contagem de testes nesta revisão de 2026-08-28 era 249. A revisão de 2026-08-29 (§10) reflete o
+estado atual (319).
+
+---
+
+## 10. Revisão — 2026-08-29 (`6ca67f3` → `c2d05ae`)
+
+Entre a emissão original e o HEAD atual, o commit `3ee31cb`
+(*"make conversations durable, guarded and traceable"*) e os que o seguem fecharam a maior parte dos
+bloqueadores de nível 2. Este é o delta, verificado por leitura de fonte e por `npm run verify`/`audit`
+(ambos exit 0).
+
+### O que foi resolvido
+
+| Bloqueador original | Estado | Evidência |
+|---|---|---|
+| **B1** — sem Bedrock Guardrail | ✅ Resolvido | `createGuardrail` (conteúdo + PII `ANONYMIZE` + `PROMPT_ATTACK`), obrigatório sob `pilot`/`prod` |
+| **B3** — sem registro do que o agente respondeu | ✅ Resolvido | AgentCore Memory com retenção e CMK; `agent/src/memory.ts` |
+| **B4** — zero tracing distribuído | ✅ Resolvido | X-Ray nas 3 Lambdas + stage; OTel no agente; correlation ID fim a fim, obrigatório sob `pilot`/`prod` |
+| **B5** — sem CMK | ✅ Resolvido | `DataKey` (KMS) própria compartilhada entre stacks, em conversas, tabelas, logs e tópico |
+| **P1 (nível 3)** — estado conversacional em memória | ✅ Resolvido | AgentCore Memory, durável, isolado por `actorId`, teto de contexto por sessão |
+| Gate de perfil com 6 regras | ✅ Ampliado para 9 | `GUARDRAIL_ENABLED`, `TRACING_ENABLED`, `CONVERSATION_RETENTION_DAYS` acrescentados |
+
+### O que permanece aberto (nível 2)
+
+| # | Item | Sev. | Necessário para o "go"? |
+|---|---|---|---|
+| **B2** | Runtime sem VPC (`networkMode: 'PUBLIC'`) | Alta | **Sim** — ver critério abaixo |
+| **B7** | Sem pipeline de CD; CI não roda `cdk synth` | Média | Condicional |
+| Testes | Handlers sem teste (`handler`, `admin-handler`, `conversations-handler`) | Média | Recomendado |
+| **B6** | WAF opcional e fora do gate | Média | Recomendado (piloto fechado) |
+| **B8** | Refresh token 30d sem revogação documentada | Média | Recomendado |
+| **B9** | S3/CloudFront sem versionamento nem access logs | Baixa | Não |
+| Gov. | `LICENSE`/`SECURITY.md`/`CODEOWNERS` ausentes | Baixa | Não (mas trava jurídico do cliente) |
+| UX | `/chat` sem `ErrorCode`; `retryAfterSeconds` não consumido no frontend | Baixa | Não |
+
+### Decisão de "go" — piloto fechado com dados sensíveis e usuários reais
+
+O template passou de **condicionalmente pronto (3/5)** para **pronto com condições (4/5)** para este
+cenário. Um "go" **claro** depende de três decisões, em ordem de peso:
+
+1. **Isolamento de rede do runtime (B2) — o único bloqueador que não é uma escolha de processo.**
+   Enquanto o runtime está em `networkMode: 'PUBLIC'`, um contêiner comprometido tem egresso
+   irrestrito. Para um piloto cujo toolset **não faz chamadas de saída** (o caso do template hoje), o
+   risco é contível e pode ser aceito *explicitamente e por escrito* como exceção com prazo. No
+   momento em que uma tool alcançar qualquer backend, isso vira bloqueador rígido — mover para VPC
+   com endpoints antes do go é o caminho seguro.
+
+2. **Caminho de deploy auditável (B7).** Um piloto com dados reais precisa de deploy reversível e
+   rastreável. Não exige o pipeline completo antes do go: o mínimo aceitável é **credenciais de
+   deploy dedicadas (não pessoais), `cdk diff` revisado antes de cada deploy, e `npm run deploy` com
+   aprovação (nunca `deploy:no-approval`)**. O pipeline OIDC completo pode vir logo após.
+
+3. **Confiança no caminho crítico (testes de handler).** Os invariantes de segurança do IaC estão
+   testados, mas o *fail-closed* do handler de chat sem `claims.sub` e o *bypass* do rate limit com
+   tabela ausente não têm teste. Para dados sensíveis, recomenda-se **cobrir esses dois caminhos
+   antes do go** — é esforço baixo e fecha o modo de falha mais consequente do runtime da aplicação.
+
+**Pré-requisitos operacionais do go (independentes de código):** `DEPLOY_PROFILE=pilot` com as 9
+regras satisfeitas (o gate garante), `DEPLOY_ACCOUNT`/`DEPLOY_REGION` pinados, `WAF_ENABLED=true`
+(fortemente recomendado mesmo sendo opcional), `CONVERSATION_RETENTION_DAYS` acordado com a área de
+privacidade, e o `OTEL_EXPORTER_OTLP_ENDPOINT` apontando para um collector se métricas de
+tokens/custo forem exigidas no piloto.
+
+**Resumo:** o go é viável. Com WAF ligado e a exceção de rede aceita por escrito (dado que o toolset
+não faz egresso), os itens 2 e 3 são a diferença entre um go condicional e um go limpo — ambos de
+esforço baixo. B9, governança de repositório e o contrato de erro do `/chat` não bloqueiam este
+cenário.

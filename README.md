@@ -81,6 +81,10 @@ infra/               AWS CDK app for auth, the runtime, the BFF and hosting
 Each has its own README: [agent](agent/README.md) · [frontend](chatbot-frontend/README.md) ·
 [bff](chatbot-bff/README.md) · [infra](infra/README.md).
 
+An independent engineering assessment — readiness for demos, closed pilots with sensitive data, and
+public production, scored by dimension with a prioritized backlog — is in
+[assessment.md](assessment.md).
+
 ## Making it yours
 
 | To change | Edit |
