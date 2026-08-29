@@ -1,11 +1,14 @@
-# Agentic apps on AWS — Strands Agents on Bedrock AgentCore
+# Agentic apps on AWS
 
-A starting point for an agentic application on AWS: a Strands agent in TypeScript on Amazon Bedrock
-AgentCore Runtime, reached through one pattern — **Frontend → BFF → AgentCore Runtime** — with
-authentication, user management, cost and abuse controls, and infrastructure already in place.
+A complete, deployable agentic application on AWS. A Strands agent in TypeScript
+on Amazon Bedrock AgentCore Runtime, fronted by a React chat UI and reached through one pattern,
+**Frontend → BFF → AgentCore Runtime**, with authentication, durable per-user conversations, user
+management, cost and abuse controls, content guardrails, end-to-end tracing, and the CDK
+infrastructure for all of it already in place.
 
 The domain is deliberately thin. The agent is a general-purpose personal assistant with two example
-tools, so what you inherit is the scaffolding, not someone else's product.
+tools, so what you inherit is the scaffolding — the hard parts of putting an agent in front of real
+users — not someone else's product.
 
 ## What you get
 
@@ -120,19 +123,22 @@ So `DEPLOY_PROFILE=pilot` (or `prod`) turns those notes into a build that refuse
 before a resource is described, naming every violation at once:
 
 ```text
-DEPLOY_PROFILE=pilot refuses 8 sandbox defaults:
+DEPLOY_PROFILE=pilot refuses 9 sandbox defaults:
   - PUBLIC_SIGNUP_ENABLED must be false. Open sign-up lets anyone mint accounts, …
   - ALLOWED_ORIGIN must name the app origin. "*" is the first-deploy default …
   - ALERT_EMAIL is required. The alarms exist either way — without a subscriber …
   - COGNITO_MFA must be "required". A password alone is one leaked credential away …
   - COGNITO_THREAT_PROTECTION must be "audit" or "enforced". …
+  - RETAIN_DATA must be true. A stack replacement would otherwise take every account with it. …
   - GUARDRAIL_ENABLED must be true. Nothing else in this stack inspects what the model …
   - TRACING_ENABLED must be true. A wrong answer in a pilot has to be reconstructable …
   - CONVERSATION_RETENTION_DAYS must be set. Conversations are recorded, so how long …
 ```
 
-The rules fall into two groups. The first five are **access posture** — who can get in and under what
-conditions. The last three are **evidence posture**: whether a deployment can say what the agent
+The rules fall into three groups. Five are **access posture** — who can get in and under what
+conditions: open sign-up, the CORS origin, an alarm subscriber, a second factor, and threat
+protection. One is **durability**: `RETAIN_DATA`, so a stack replacement cannot take every account
+with it. The last three are **evidence posture** — whether a deployment can say what the agent
 replied, for how long it is kept, and which turn a user is complaining about. A deployment can
 satisfy every access rule and still be unable to answer any of those three, which is why they are
 gated rather than documented.
