@@ -19,6 +19,9 @@ import {
   resolveRetainData,
   resolveUserRateLimit,
   DEFAULT_USER_RATE_LIMIT,
+  resolveConversationRetentionDays,
+  resolveGuardrailEnabled,
+  resolveTracingEnabled,
 } from '../config.js'
 
 describe('resolveAgentImagePlatform', () => {
@@ -193,6 +196,9 @@ describe('the deployment profile gate', () => {
     mfa: 'required' as const,
     threatProtection: 'audit' as const,
     retainData: true,
+    guardrailEnabled: true,
+    tracingEnabled: true,
+    conversationRetentionDays: 30,
   })
 
   it('accepts a pilot that has actually been configured for one', () => {
@@ -211,6 +217,9 @@ describe('the deployment profile gate', () => {
         alertEmail: undefined,
         mfa: 'off',
         threatProtection: 'off',
+        guardrailEnabled: false,
+        tracingEnabled: false,
+        conversationRetentionDays: undefined,
       }),
     ).not.toThrow()
   })
@@ -222,6 +231,9 @@ describe('the deployment profile gate', () => {
     ['COGNITO_MFA', { mfa: 'optional' as const }],
     ['COGNITO_THREAT_PROTECTION', { threatProtection: 'off' as const }],
     ['RETAIN_DATA', { retainData: false }],
+    ['GUARDRAIL_ENABLED', { guardrailEnabled: false }],
+    ['TRACING_ENABLED', { tracingEnabled: false }],
+    ['CONVERSATION_RETENTION_DAYS', { conversationRetentionDays: undefined }],
   ])('refuses a pilot still carrying the sandbox %s', (variable, override) => {
     expect(() => assertDeploymentPosture({ ...pilot(), ...override })).toThrow(variable)
   })
@@ -246,6 +258,31 @@ describe('the deployment profile gate', () => {
     expect(err?.message).toContain('PUBLIC_SIGNUP_ENABLED')
     expect(err?.message).toContain('ALLOWED_ORIGIN')
     expect(err?.message).toContain('ALERT_EMAIL')
+  })
+
+  /**
+   * The three additions a pilot's *evidence* posture depends on, as opposed to its access posture.
+   * A deployment can pass every original rule and still be unable to say what the agent replied, for
+   * how long it is kept, or which turn a user is complaining about.
+   */
+  it('refuses a pilot that records conversations without saying for how long', () => {
+    const err = (() => {
+      try {
+        assertDeploymentPosture({
+          ...pilot(),
+          guardrailEnabled: false,
+          tracingEnabled: false,
+          conversationRetentionDays: undefined,
+        })
+        return undefined
+      } catch (e) {
+        return e as Error
+      }
+    })()
+
+    expect(err?.message).toContain('GUARDRAIL_ENABLED')
+    expect(err?.message).toContain('TRACING_ENABLED')
+    expect(err?.message).toContain('CONVERSATION_RETENTION_DAYS')
   })
 
   it('holds prod to everything pilot requires', () => {
@@ -273,6 +310,37 @@ describe('the deployment profile gate', () => {
   it('does not fail a pilot for running without one', () => {
     expect(() => assertDeploymentPosture(pilot())).not.toThrow()
   })
+
+  /**
+   * Both are billed per unit of use, so both stay off until asked for — the template's promise is
+   * that an unset profile costs nothing. What makes that safe is the gate above, not the default.
+   */
+  it('leaves the guardrail and tracing off unless asked for', () => {
+    expect(resolveGuardrailEnabled()).toBe(false)
+    expect(resolveGuardrailEnabled('true')).toBe(true)
+    expect(() => resolveGuardrailEnabled('maybe')).toThrow('GUARDRAIL_ENABLED')
+
+    expect(resolveTracingEnabled()).toBe(false)
+    expect(resolveTracingEnabled('true')).toBe(true)
+    expect(() => resolveTracingEnabled('maybe')).toThrow('TRACING_ENABLED')
+  })
+
+  /**
+   * Unset means unset, not thirty. "How long do you keep what people typed" is the question a pilot
+   * is asked first, and a number this template picked would be an answer nobody chose.
+   */
+  it('has no retention default to fall back on', () => {
+    expect(resolveConversationRetentionDays()).toBeUndefined()
+    expect(resolveConversationRetentionDays('  ')).toBeUndefined()
+    expect(resolveConversationRetentionDays('90')).toBe(90)
+  })
+
+  it.each([['0'], ['-1'], ['1.5'], ['forever']])(
+    'refuses %s as a retention period rather than coercing it',
+    (input) => {
+      expect(() => resolveConversationRetentionDays(input)).toThrow('CONVERSATION_RETENTION_DAYS')
+    },
+  )
 
   it('rejects an unknown MFA or threat-protection mode rather than guessing', () => {
     expect(resolveMfaMode()).toBe('off')

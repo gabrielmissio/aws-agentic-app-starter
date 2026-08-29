@@ -28,14 +28,49 @@ stale `export PROJECT_NAME=…` in your shell silently wins over `.env` and depl
 | Stack | What it holds |
 |---|---|
 | `auth` | Cognito user pool, the `admins` group, the CustomMessage email trigger |
-| `agent` | The agent container and the Bedrock AgentCore Runtime |
-| `bff` | API Gateway, the chat and admin Lambdas, the per-caller quota table, alarms, budget, optional web ACL |
+| `agent` | The agent container, the Bedrock AgentCore Runtime, the conversation memory, the optional guardrail, and the deployment's KMS key |
+| `bff` | API Gateway, the chat, admin and conversation Lambdas, the quota and conversation-index tables, alarms, budget, optional web ACL |
 | `frontend` | S3 + CloudFront, and the runtime `config.js` written at deploy time |
 
-`agent` before `bff` because the BFF's role is scoped to the runtime ARN; `bff` before `frontend`
-because `config.js` carries the API URL. `agent` needs nothing from `auth` — see
+`agent` before `bff` because the BFF's role is scoped to the runtime ARN, and because the memory
+resource and the KMS key it creates are what the conversation routes read and every store in `bff` is
+encrypted with; `bff` before `frontend` because `config.js` carries the API URL. `agent` needs
+nothing from `auth` — see
 [Why the BFF is the only transport](../README.md#why-the-bff-is-the-only-transport) for why that is
 the point rather than an oversight.
+
+### One key for the whole deployment
+
+`AgentStack` creates a single customer-managed KMS key and `BffStack` uses it for its log groups,
+both tables and the alarm topic. One key rather than one per service: an operator who has to reason
+about which key protects what will get it wrong, and the blast radius of the key is the deployment
+either way.
+
+AWS-owned keys encrypt at rest too. What a CMK adds is that the grants are visible, auditable in
+CloudTrail by key, and revocable — the difference between "encrypted" and "encrypted under a key we
+control" that a pilot's security review actually asks about.
+
+Two grants on it are easy to miss and fail silently if dropped: CloudWatch Logs encrypts *as the
+service* and needs a statement scoped by encryption context, and an alarm publishing to an encrypted
+topic is CloudWatch calling KMS — without that grant the alarm delivers nothing and reports nothing.
+
+### Conversation memory
+
+`AgentStack` creates an AgentCore Memory resource whose `eventExpiryDuration` **is** the retention
+policy — enforced by the service rather than by a cleanup job this template would have to keep
+correct. `CONVERSATION_RETENTION_DAYS` sets it, and the same number becomes the TTL on the
+conversation index rows in `BffStack`, so the index cannot outlive the conversations it points at.
+
+The grants split three ways, and the split is the point:
+
+| Principal | Can | Cannot |
+|---|---|---|
+| Agent runtime | `CreateEvent`, `ListEvents`, `GetEvent` | Delete anything |
+| Conversations Lambda | `ListEvents`, `GetEvent`, `DeleteEvent` | Write history, invoke the model |
+| Chat Lambda | Invoke the runtime, `UpdateItem` on both tables | Read or write any stored conversation |
+
+A browser-reachable function that could write history could also forge it, and a forged transcript is
+worse than none because it is believed.
 
 ### Where a data layer goes
 
@@ -66,6 +101,11 @@ because a conditional check-and-increment is the only operation the code perform
 | `COGNITO_MFA` | `off` (default) · `optional` · `required`. Authenticator app (TOTP) only |
 | `COGNITO_THREAT_PROTECTION` | `off` (default) · `audit` · `enforced`. Anything but `off` moves the pool to the billed Plus plan |
 | `WAF_ENABLED` | A web ACL on the API stage. Off in every profile — the only layer that filters *before* authentication |
+| `GUARDRAIL_ENABLED` | A Bedrock guardrail on model input and output: content filters, prompt-attack detection, PII anonymization. Off by default (billed per text unit); **required** under `pilot`/`prod` |
+| `TRACING_ENABLED` | X-Ray on the API stage and all three Lambdas. Off by default (billed per trace); **required** under `pilot`/`prod` |
+| `CONVERSATION_RETENTION_DAYS` | How long a conversation is kept. Sets `eventExpiryDuration` on the memory resource and the TTL on the index rows. **Required** under `pilot`/`prod`, with no default — the answer is yours |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Where the agent container exports spans and token metrics. Passed through untouched; unset, the container's instruments stay silent while the Lambdas still trace |
+| `MEMORY_MAX_MESSAGES` | How much history is replayed into a turn, default `40`. Every turn re-sends its context, so this bounds what a long conversation costs |
 | `APP_URL` | Canonical app URL for the emails. Unset, falls back to what `frontend` published to SSM |
 | `RETAIN_DATA` | `true` (default): the user pool and frontend bucket survive `cdk destroy` |
 | `ALERT_EMAIL` | Subscribes an address to the three CloudWatch alarms and the budget. They fire either way |
@@ -75,7 +115,12 @@ because a conditional check-and-increment is the only operation the code perform
 | `USER_RATE_LIMIT` / `USER_RATE_LIMIT_WINDOW_SECONDS` | `/chat` calls per caller per window, default `20`/`60`. `API_RATE_LIMIT` bounds the account and cannot stop one caller consuming all of it |
 
 API Gateway access logs — method, path, status, latency, caller `sub`, never the body — are always
-on, in `/aws/apigateway/<project>-chat-api`.
+on, in `/aws/apigateway/<project>-chat-api`. Every log group, table and the alarm topic are encrypted
+with the deployment's own KMS key.
+
+The three gated variables above are the *evidence* half of the profile gate: whether a deployment can
+say what the agent replied, for how long it is kept, and which turn a user is complaining about. A
+deployment can satisfy every access rule and still answer none of those.
 
 ## Managing users and admins
 

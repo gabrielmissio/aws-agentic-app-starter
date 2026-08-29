@@ -31,7 +31,7 @@
     "@types/node": "^25.6.0",
     "aws-cdk": "^2.1135.1",
     "tsx": "^4.21.0",
-    "typescript": "^6.0.3",
+    "typescript": "^7.0.2",
     "vitest": "^4.1.10"
   }
 }

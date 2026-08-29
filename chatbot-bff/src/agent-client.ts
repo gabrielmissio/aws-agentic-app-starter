@@ -53,12 +53,23 @@ export interface InvokeAgentInput {
   message: string
   sessionId: string
   agentRuntimeArn: string
+  /** Ties this invocation to the browser request and the BFF log lines that describe it. */
+  correlationId?: string
+  /** The X-Ray root from the Lambda's own segment, when active tracing is on. */
+  traceId?: string
 }
+
 export async function invokeAgentStream(input: InvokeAgentInput): Promise<AsyncIterable<Uint8Array>> {
   const command = new InvokeAgentRuntimeCommand({
     runtimeSessionId: input.sessionId,
     agentRuntimeArn: input.agentRuntimeArn,
     qualifier: 'DEFAULT',
+    // AgentCore carries these into the runtime's telemetry context, which is what makes a container
+    // span joinable to the Lambda invocation that caused it. `baggage` is the W3C field for
+    // application-defined context, so our own id travels there rather than being squeezed into a
+    // trace id the platform assigns meaning to.
+    ...(input.traceId ? { traceId: input.traceId } : {}),
+    ...(input.correlationId ? { baggage: `correlationId=${input.correlationId}` } : {}),
     payload: new TextEncoder().encode(input.message),
   })
 

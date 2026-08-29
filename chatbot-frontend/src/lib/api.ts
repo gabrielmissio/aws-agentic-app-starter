@@ -1,4 +1,5 @@
 import { fetchAuthSession } from 'aws-amplify/auth'
+import { CORRELATION_HEADER, newCorrelationId } from './bff-client'
 import { parseAgentCoreStream, type StreamCallbacks } from './stream-parser'
 import { readAppConfig } from './app-config'
 
@@ -18,6 +19,8 @@ export type AgentResponse = {
 
 export interface BffStreamCallbacks extends StreamCallbacks {
   onSessionId?: (sessionId: string) => void
+  /** The id that names this turn in the BFF's logs and on the stored exchange. */
+  onCorrelationId?: (correlationId: string) => void
 }
 
 /**
@@ -41,11 +44,17 @@ export async function sendMessageBff(
     throw new Error('No valid ID token. Please sign in.')
   }
 
+  // Minted here rather than by the server: the id exists to connect what the user saw to what the
+  // logs recorded, and only the browser is present for the first half of that.
+  const correlationId = newCorrelationId()
+  callbacks.onCorrelationId?.(correlationId)
+
   const response = await fetch(`${BFF_URL}/chat`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Authorization: idToken,
+      [CORRELATION_HEADER]: correlationId,
     },
     body: JSON.stringify({ message, sessionId }),
   })

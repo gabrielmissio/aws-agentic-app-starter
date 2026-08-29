@@ -2,14 +2,53 @@ import * as strands from '@strands-agents/sdk'
 import { createTools } from './tools'
 
 /**
+ * The content guardrail, when one is configured.
+ *
+ * A Bedrock guardrail is the only layer in this stack that inspects what the model is *asked* and
+ * what it *answers*: IAM bounds who may invoke it and the system prompt asks the model to behave,
+ * but neither filters content, redacts PII, or recognizes a prompt injection. The gate in
+ * `infra/src/config.ts` requires one under `pilot` and `prod`; here it stays optional so a demo
+ * still runs without paying for it.
+ */
+function resolveGuardrail(
+  env: NodeJS.ProcessEnv = process.env,
+): strands.BedrockGuardrailConfig | undefined {
+  const guardrailIdentifier = env.BEDROCK_GUARDRAIL_ID?.trim()
+  const guardrailVersion = env.BEDROCK_GUARDRAIL_VERSION?.trim()
+
+  if (!guardrailIdentifier || !guardrailVersion) return undefined
+
+  return {
+    guardrailIdentifier,
+    guardrailVersion,
+    // `guardLatestUserMessage` scopes input evaluation to the turn the user just sent. Without it
+    // every prior turn is re-evaluated on every request, so guardrail cost grows with the square of
+    // the conversation. Prior turns were already checked when they were new.
+    guardLatestUserMessage: true,
+    // Redact rather than only block, and on both sides: a blocked *output* that stays in the
+    // message array would otherwise be persisted to the session snapshot and replayed into the next
+    // turn's context. `saveLatestOn: 'message'` in sessions.ts is what makes the redacted version
+    // the one that reaches storage.
+    redaction: { input: true, output: true },
+    trace: 'enabled',
+  }
+}
+
+/**
  * Shared on purpose: the constructor builds a `BedrockRuntimeClient`, so a per-request model means a
  * per-request connection pool and a TLS handshake on every call. It is stateless between
  * invocations — unlike the `Agent` below, which is why that part is not shared.
  */
+const guardrailConfig = resolveGuardrail()
+
 const bedrockModel = new strands.BedrockModel({
   region: process.env.AWS_REGION || 'us-east-1',
   modelId: process.env.BEDROCK_MODEL_ID || 'global.anthropic.claude-sonnet-4-6',
+  ...(guardrailConfig ? { guardrailConfig } : {}),
 })
+
+/** Whether model input and output pass through a Bedrock guardrail. Reported once at boot. */
+export const isGuarded = Boolean(guardrailConfig)
 
 /** Resolved once at module load: the toolset is a function of the deployment, not of the request. */
 const tools = createTools()
@@ -54,14 +93,14 @@ claim about who someone is from the conversation.
  * so one reused across requests on a warm container accumulates state *across callers*: one user's
  * conversation leaks into the next, and concurrent invocations interleave their appends.
  *
- * Cheap to allocate — a prompt, a tool list and `messages`, this session's prior turns. The
- * expensive part is the module-level `bedrockModel` above.
+ * Cheap to allocate — a prompt, a tool list and this conversation's prior turns. The expensive parts
+ * are the module-level `bedrockModel` above and the shared client in `memory.ts`.
  */
-export function createAgent(messages?: strands.Agent['messages']): strands.Agent {
+export function createAgent(messages?: strands.Message[]): strands.Agent {
   return new strands.Agent({
     systemPrompt,
     model: bedrockModel,
-    messages,
     tools: [...tools],
+    ...(messages ? { messages } : {}),
   })
 }

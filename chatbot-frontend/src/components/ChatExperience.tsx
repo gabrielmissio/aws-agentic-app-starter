@@ -1,11 +1,18 @@
-import { useEffect, useRef, useState } from 'react'
-import { CalendarClock, Lightbulb, Send, ShieldCheck, Sparkles } from 'lucide-react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { CalendarClock, Lightbulb, PanelLeft, Send, ShieldCheck, Sparkles } from 'lucide-react'
 import { UserMenu } from './UserMenu.tsx'
 import { ChatBubble, type ChatMessage } from './ChatBubble.tsx'
+import { ConversationSidebar } from './ConversationSidebar.tsx'
 import { ThinkingBubble } from './ThinkingBubble.tsx'
 import { LanguageSwitcher } from './LanguageSwitcher.tsx'
-import { AppHeader, BrandAvatar, Button, CARD_CLASS } from './ui/index.ts'
+import { Alert, AppHeader, BrandAvatar, Button, CARD_CLASS } from './ui/index.ts'
 import { sendMessageBff } from '@/lib/api.ts'
+import {
+  deleteConversation,
+  listConversations,
+  readConversation,
+  type ConversationSummary,
+} from '@/lib/conversations-api.ts'
 import { BRAND } from '@/lib/brand.ts'
 import { useI18n } from '@/lib/i18n/context.ts'
 import { isZoomed } from '@/lib/viewport.ts'
@@ -37,17 +44,98 @@ export function ChatExperience({ userEmail, isAdmin, onSignOut, onOpenAdmin }: C
     { icon: ShieldCheck, label: t('chat.suggestionAboutLabel'), prompt: t('chat.suggestionAboutPrompt') },
   ]
 
+  const welcome = (): ChatMessage[] => [
+    { id: 'welcome', role: 'agent', content: t('chat.welcome', { brand: BRAND.name }) },
+  ]
+
   const [signingOut, setSigningOut] = useState(false)
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    {
-      id: 'welcome',
-      role: 'agent',
-      content: t('chat.welcome', { brand: BRAND.name }),
-    },
-  ])
+  const [messages, setMessages] = useState<ChatMessage[]>(welcome)
   const [input, setInput] = useState('')
   const [thinking, setThinking] = useState(false)
   const [sessionId, setSessionId] = useState<string | undefined>()
+
+  const [conversations, setConversations] = useState<ConversationSummary[]>([])
+  const [loadingConversations, setLoadingConversations] = useState(true)
+  const [deletingSessionId, setDeletingSessionId] = useState<string>()
+  const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [notice, setNotice] = useState<string>()
+
+  /**
+   * Refreshing the list is never worth interrupting the conversation for: a failure here costs a
+   * stale sidebar, and the chat on screen still works. The banner says so and nothing is thrown.
+   */
+  const refreshConversations = useCallback(async () => {
+    try {
+      setConversations(await listConversations())
+    } catch {
+      setNotice(t('conversations.loadFailed'))
+    } finally {
+      setLoadingConversations(false)
+    }
+    // `t` is stable per locale; refreshing on a language change is harmless and keeps the banner
+    // in the language the user is now reading.
+  }, [t])
+
+  useEffect(() => {
+    void refreshConversations()
+  }, [refreshConversations])
+
+  const startNewConversation = () => {
+    setMessages(welcome())
+    setSessionId(undefined)
+    setInput('')
+    setNotice(undefined)
+    setSidebarOpen(false)
+  }
+
+  const openConversation = async (id: string) => {
+    if (thinking) return
+
+    setSidebarOpen(false)
+    setNotice(undefined)
+
+    try {
+      const transcript = await readConversation(id)
+      setMessages(
+        transcript.map((message, index) => ({
+          id: `${id}-${index}`,
+          role: message.role,
+          content: message.content,
+        })),
+      )
+      setSessionId(id)
+    } catch {
+      setNotice(t('conversations.openFailed'))
+      // The list is refreshed rather than left alone: the most likely reason a transcript is gone
+      // is that its retention window passed, and the row pointing at it should go too.
+      void refreshConversations()
+    }
+  }
+
+  const removeConversation = async (id: string) => {
+    const summary = conversations.find((conversation) => conversation.sessionId === id)
+    // The browser's own dialog, deliberately: a destructive action needs a confirmation the user
+    // cannot mistake for part of the page, and a bespoke modal here would be the app's only one.
+    if (!window.confirm(t('conversations.deleteConfirm', { title: summary?.title ?? '' }))) return
+
+    setDeletingSessionId(id)
+    setNotice(undefined)
+
+    try {
+      await deleteConversation(id)
+      setConversations((current) => current.filter((conversation) => conversation.sessionId !== id))
+      // Only if the deleted conversation is the one on screen — deleting a different one from the
+      // sidebar must not throw away what the user is in the middle of reading.
+      if (id === sessionId) {
+        setMessages(welcome())
+        setSessionId(undefined)
+      }
+    } catch {
+      setNotice(t('conversations.deleteFailed'))
+    } finally {
+      setDeletingSessionId(undefined)
+    }
+  }
 
   const scrollRef = useRef<HTMLDivElement>(null)
   /** Whether the reader is following the conversation or has scrolled back into its history. */
@@ -156,6 +244,9 @@ export function ChatExperience({ userEmail, isAdmin, onSignOut, onOpenAdmin }: C
 
     try {
       await sendMessageBff(trimmed, currentSessionId, callbacks)
+      // After the turn, not before: the server names a conversation from its first message, so the
+      // title only exists once the request has been accepted.
+      void refreshConversations()
     } catch {
       patch((msg) => ({
         ...msg,
@@ -169,9 +260,34 @@ export function ChatExperience({ userEmail, isAdmin, onSignOut, onOpenAdmin }: C
   }
 
   return (
-    <div className="flex h-viewport flex-col bg-background">
+    <div className="flex h-viewport bg-background">
+      <ConversationSidebar
+        conversations={conversations}
+        activeSessionId={sessionId}
+        loading={loadingConversations}
+        deletingSessionId={deletingSessionId}
+        onSelect={(id) => void openConversation(id)}
+        onNew={startNewConversation}
+        onDelete={(id) => void removeConversation(id)}
+        open={sidebarOpen}
+        onClose={() => setSidebarOpen(false)}
+      />
+
+      <div className="flex min-w-0 flex-1 flex-col">
       <AppHeader
-        leading={<BrandAvatar online />}
+        leading={
+          <>
+            <button
+              type="button"
+              onClick={() => setSidebarOpen(true)}
+              aria-label={t('conversations.open')}
+              className="-ml-1 rounded-lg p-2 text-muted-foreground hover:bg-muted lg:hidden"
+            >
+              <PanelLeft className="h-4 w-4" />
+            </button>
+            <BrandAvatar online />
+          </>
+        }
         title={BRAND.name}
         subtitle={BRAND.tagline}
         actions={
@@ -197,6 +313,14 @@ export function ChatExperience({ userEmail, isAdmin, onSignOut, onOpenAdmin }: C
         }
       />
 
+      {notice && (
+        <div className="mx-auto w-full max-w-3xl px-4 pt-3">
+          <Alert tone="danger" role="alert">
+            {notice}
+          </Alert>
+        </div>
+      )}
+
       <main
         ref={scrollRef}
         onScroll={(e) => {
@@ -216,7 +340,9 @@ export function ChatExperience({ userEmail, isAdmin, onSignOut, onOpenAdmin }: C
           ))}
           {thinking && <ThinkingBubble />}
 
-          {messages.length === 1 && !thinking && (
+          {/* Only on a genuinely new conversation. A restored one that happens to hold a single
+              message is not an empty state, and offering starters under it reads as a bug. */}
+          {!sessionId && messages.length === 1 && !thinking && (
             <div className="mt-2 grid gap-2 sm:grid-cols-2">
               {SUGGESTIONS.map(({ icon: Icon, label, prompt }) => (
                 <button
@@ -265,6 +391,7 @@ export function ChatExperience({ userEmail, isAdmin, onSignOut, onOpenAdmin }: C
         </form>
         <p className="pb-3 text-center text-xs text-subtle">{t('chat.footer')}</p>
       </footer>
+      </div>
     </div>
   )
 }

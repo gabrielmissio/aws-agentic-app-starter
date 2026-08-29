@@ -7,33 +7,54 @@ export const MIN_SESSION_ID_LENGTH = 33
 export const SESSION_NAMESPACE_LENGTH = 16
 
 /**
+ * Joins the namespace to the random half.
+ *
+ * A hyphen, not a colon. The agent persists each conversation under this id as an S3 key prefix,
+ * and the Strands session store validates it against `^[a-z0-9_-]+$` — a colon throws from inside a
+ * snapshot write, after the model has already been billed for the turn. See
+ * `agent/src/sessions.ts`, which restates the same rule from the other side.
+ */
+export const SESSION_SEPARATOR = '-'
+
+/**
  * Derives a short, stable namespace from the caller's Cognito `sub`. A session id is a bearer token
  * for AgentCore conversation history, so prefixing every id with a hash of the caller's identity
  * stops a client constructing or replaying one that resolves to someone else's session.
+ *
+ * It is also what partitions conversation storage: everything under `<namespace>-` in the bucket
+ * belongs to one person, and the namespace is unguessable without the `sub` it hashes.
  */
 export function sessionNamespace(userId: string): string {
   return createHash('sha256').update(userId).digest('hex').slice(0, SESSION_NAMESPACE_LENGTH)
 }
 
 /**
- * A client-supplied id is honored only if it carries the caller's namespace and clears AgentCore's
- * minimum length; anything else mints a fresh one silently, since "forged" and "just expired" look
- * the same to the client. `generate` is injectable so a test need not depend on `randomUUID()`.
+ * Whether this session id was minted for this caller. The single ownership check behind every route
+ * that reads or deletes a conversation — a session id names an S3 prefix, so an unchecked one is a
+ * path to another user's transcript.
+ *
+ * Length is part of the check, not a separate concern: a bare namespace with nothing after it is a
+ * prefix that matches *all* of that caller's sessions rather than one of them.
+ */
+export function belongsToCaller(candidate: unknown, userId: string): candidate is string {
+  return (
+    typeof candidate === 'string' &&
+    candidate.startsWith(`${sessionNamespace(userId)}${SESSION_SEPARATOR}`) &&
+    candidate.length >= MIN_SESSION_ID_LENGTH
+  )
+}
+
+/**
+ * A client-supplied id is honored only if it belongs to the caller; anything else mints a fresh one
+ * silently, since "forged" and "just expired" look the same to the client. `generate` is injectable
+ * so a test need not depend on `randomUUID()`.
  */
 export function resolveSessionId(
   candidate: unknown,
   userId: string,
   generate: () => string = randomUUID,
 ): string {
-  const prefix = `${sessionNamespace(userId)}:`
+  if (belongsToCaller(candidate, userId)) return candidate
 
-  if (
-    typeof candidate === 'string' &&
-    candidate.startsWith(prefix) &&
-    candidate.length >= MIN_SESSION_ID_LENGTH
-  ) {
-    return candidate
-  }
-
-  return `${prefix}${generate()}`
+  return `${sessionNamespace(userId)}${SESSION_SEPARATOR}${generate()}`
 }

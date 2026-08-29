@@ -32,3 +32,23 @@ export function withSessionContext(context: SessionContext, message: string): st
     message,
   ].join('\n')
 }
+
+/**
+ * Removes the identity block, recovering the text the user actually typed.
+ *
+ * The wrapped form is what gets persisted to the session snapshot, so every path that replays a
+ * stored conversation — the transcript route, a conversation title — has to undo it. Kept beside
+ * `withSessionContext` so the pair cannot drift: a change to the wire format breaks both at once,
+ * which is the only way it stays safe to change.
+ *
+ * A message that carries no block is returned untouched, which covers a turn recorded before this
+ * existed and a runtime invoked directly.
+ */
+export function stripSessionContext(text: string): string {
+  if (!text.startsWith(CONTEXT_HEADER)) return text
+
+  const messageAt = text.indexOf(MESSAGE_HEADER)
+  if (messageAt === -1) return text
+
+  return text.slice(messageAt + MESSAGE_HEADER.length).replace(/^\n+/, '')
+}

@@ -52,6 +52,19 @@ pool alone, no identity pool. See
 [`AuthScreen`](src/components/AuthScreen.tsx) between self sign-up and invite-only, where the first
 sign-in answers Cognito's `NEW_PASSWORD_REQUIRED` challenge.
 
+## Conversations
+
+The sidebar ([`src/components/ConversationSidebar.tsx`](src/components/ConversationSidebar.tsx))
+lists the signed-in user's past conversations, opens one, and deletes one. It reads
+`GET /conversations`, which serves an index of titles and timestamps — so rendering it fetches no
+message content. A transcript is loaded only for the conversation actually opened.
+
+One panel serves both layouts: a permanent column from `lg` up, an overlay drawer below it.
+Rendering it twice would mean two sources of truth for which conversation is selected.
+
+The list refreshes *after* a turn completes, not before: the server names a conversation from its
+first message, so the title only exists once the request has been accepted.
+
 ## Admin panel
 
 Members of the Cognito `admins` group get an **Admin** badge in the header opening
