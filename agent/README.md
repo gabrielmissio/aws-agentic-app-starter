@@ -23,6 +23,52 @@ Listens on `http://localhost:8080` with `GET /ping` and `POST /invocations`.
 `.env.example` documents every variable; the ones that matter are `AWS_REGION`, `BEDROCK_MODEL_ID`,
 and `AGENT_RUNTIME_ARN` for `invoke:bedrock`.
 
+## Conversation memory
+
+History lives in AgentCore Memory ([`src/memory.ts`](src/memory.ts)), not in the container. Each turn
+loads the prior messages for its session and files the exchange as one event, so a restart, a second
+replica or a redeploy costs nothing. Encryption and retention are properties of the memory resource
+in `AgentStack`, which is the point: "how long do you keep this" is answered by a service, not by a
+cleanup job this template would have to keep correct.
+
+Two boundaries are worth knowing before you change it:
+
+- **`actorId` is the isolation.** It is the caller namespace the BFF prefixes onto every session id —
+  a hash of the Cognito `sub`, so no user identifier is written into a second service. Every read
+  names one, so a leaked session id on its own reaches nothing.
+- **Only user and assistant text is stored.** Tool calls and results are not: a `toolUse` block
+  replayed without the `toolResult` that answered it is a message Bedrock rejects. What the agent
+  *did* is a question for its trace; what it *said* is what memory holds.
+
+`MEMORY_MAX_MESSAGES` caps how much history is replayed. Every turn re-sends the context it is given,
+so an uncapped history makes a long conversation cost more with every message.
+
+Unset `AGENTCORE_MEMORY_ID` — the local default — and the runtime answers each turn without history
+and records nothing, so `npm run dev` needs no managed resource.
+
+## Guardrail
+
+Set `BEDROCK_GUARDRAIL_ID` and `BEDROCK_GUARDRAIL_VERSION` and every turn passes through a Bedrock
+guardrail on the way in and on the way out ([`src/agent.ts`](src/agent.ts)). Both must be set — a
+half-configured pair is treated as no guardrail rather than as an error, so a version that failed to
+resolve cannot leave the model unfiltered while looking configured.
+
+Redaction is on for input *and* output. A blocked output left in the message array would otherwise be
+persisted and replayed into the next turn's context; the SDK's `redaction` config is what makes the
+redacted text the version that reaches storage.
+
+## Telemetry
+
+The Strands `Agent` emits spans and token/tool metrics on its own, but they reach a no-op provider
+until one is registered. [`src/telemetry.ts`](src/telemetry.ts) registers it when
+`OTEL_EXPORTER_OTLP_ENDPOINT` is set — the standard variable, so a runtime that already has a
+collector needs nothing else.
+
+It installs `AsyncLocalStorageContextManager` explicitly rather than letting the SDK reach for
+`NodeTracerProvider`: that package pulls `@opentelemetry/propagator-jaeger`, which carries a
+high-severity advisory `npm run audit` gates on. The context manager is the part
+`NodeTracerProvider` exists to provide, without the rest of what it brings.
+
 ## Tools
 
 Two example tools ship here — `get_current_time` and `get_signed_in_user` — deliberately trivial, so

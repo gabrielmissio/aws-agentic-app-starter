@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { MIN_SESSION_ID_LENGTH, SESSION_NAMESPACE_LENGTH, resolveSessionId, sessionNamespace } from '../session.js'
+import {
+  MIN_SESSION_ID_LENGTH,
+  SESSION_NAMESPACE_LENGTH,
+  SESSION_SEPARATOR,
+  belongsToCaller,
+  resolveSessionId,
+  sessionNamespace,
+} from '../session.js'
 
 describe('sessionNamespace', () => {
   it('is stable for a user and different between users', () => {
@@ -42,7 +49,7 @@ describe('resolveSessionId', () => {
 
   // The prefix alone would pass a naive startsWith check but is still too short for AgentCore.
   it('rejects a candidate that has the right prefix but is too short', () => {
-    const shortButPrefixed = `${sessionNamespace(ALICE)}:`
+    const shortButPrefixed = `${sessionNamespace(ALICE)}${SESSION_SEPARATOR}`
     expect(shortButPrefixed.length).toBeLessThan(MIN_SESSION_ID_LENGTH)
 
     expect(resolveSessionId(shortButPrefixed, ALICE, generate)).toContain('generated')
@@ -56,5 +63,40 @@ describe('resolveSessionId', () => {
 
   it('produces an id AgentCore will accept', () => {
     expect(resolveSessionId(undefined, ALICE).length).toBeGreaterThanOrEqual(MIN_SESSION_ID_LENGTH)
+  })
+
+  /**
+   * The id becomes an S3 key prefix in `agent/src/sessions.ts`, where the Strands session store
+   * validates it against this exact pattern. A colon — the separator this used to use — fails it,
+   * and would surface as a snapshot write throwing mid-turn rather than as a rejected request.
+   */
+  it('produces an id the conversation store will accept as a key', () => {
+    expect(resolveSessionId(undefined, ALICE)).toMatch(/^[a-z0-9_-]+$/)
+  })
+})
+
+describe('belongsToCaller', () => {
+  const ALICE = 'alice-sub'
+  const BOB = 'bob-sub'
+
+  it('accepts an id it minted for that caller', () => {
+    expect(belongsToCaller(resolveSessionId(undefined, ALICE), ALICE)).toBe(true)
+  })
+
+  it('rejects another caller id, which is what stops a cross-user transcript read', () => {
+    expect(belongsToCaller(resolveSessionId(undefined, ALICE), BOB)).toBe(false)
+  })
+
+  /**
+   * A bare namespace is a prefix matching every one of that caller's sessions. Accepting it would
+   * turn a single-conversation read into a listing, and a delete into a wipe of the account.
+   */
+  it('rejects a bare namespace with no conversation after it', () => {
+    expect(belongsToCaller(sessionNamespace(ALICE), ALICE)).toBe(false)
+    expect(belongsToCaller(`${sessionNamespace(ALICE)}${SESSION_SEPARATOR}`, ALICE)).toBe(false)
+  })
+
+  it.each([[undefined], [null], [42], [{}]])('rejects the non-string %s', (candidate) => {
+    expect(belongsToCaller(candidate, ALICE)).toBe(false)
   })
 })

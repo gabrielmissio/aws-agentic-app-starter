@@ -15,15 +15,35 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import * as cdk from 'aws-cdk-lib'
+import * as kms from 'aws-cdk-lib/aws-kms'
 import { Match, Template } from 'aws-cdk-lib/assertions'
 import { bedrockModelResources } from '../stacks/agent-stack.js'
 import { AuthStack } from '../stacks/auth-stack.js'
 import { BffStack } from '../stacks/bff-stack.js'
 import { FrontendStack } from '../stacks/frontend-stack.js'
+import type { Construct } from 'constructs'
 
 const env = { account: '123456789012', region: 'us-east-1' }
 const FAKE_RUNTIME_ARN =
   'arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/fake-runtime-id'
+const FAKE_MEMORY_ID = 'test_conversations-abc123'
+const FAKE_MEMORY_ARN = `arn:aws:bedrock-agentcore:us-east-1:123456789012:memory/${FAKE_MEMORY_ID}`
+const FAKE_KEY_ARN = 'arn:aws:kms:us-east-1:123456789012:key/00000000-0000-4000-8000-000000000000'
+
+/**
+ * The props `BffStack` gets from `AgentStack` in the real app. Imported rather than constructed: an
+ * imported key renders as a literal ARN instead of a cross-stack export, which keeps these templates
+ * readable and lets an assertion name the value it expects.
+ */
+function upstreamProps(scope: Construct) {
+  return {
+    agentRuntimeArn: FAKE_RUNTIME_ARN,
+    memoryId: FAKE_MEMORY_ID,
+    memoryArn: FAKE_MEMORY_ARN,
+    encryptionKey: kms.Key.fromKeyArn(scope, 'TestDataKey', FAKE_KEY_ARN),
+    conversationRetentionDays: 30,
+  }
+}
 
 type PolicyStatement = { Action?: string | string[]; Resource?: string | string[] }
 
@@ -175,6 +195,7 @@ function synthBff(
     monthlyBudgetUsd?: number
     allowedOrigin?: string
     wafEnabled?: boolean
+    tracingEnabled?: boolean
   } = {},
 ) {
   const app = new cdk.App()
@@ -182,8 +203,8 @@ function synthBff(
   const stack = new BffStack(app, 'TestBff', {
     projectName: 'test',
     userPool: auth.userPool,
-    agentRuntimeArn: FAKE_RUNTIME_ARN,
     throttle: { rateLimit: 10, burstLimit: 20 },
+    ...upstreamProps(auth),
     env,
     ...overrides,
   })
@@ -316,10 +337,10 @@ describe('BffStack — per-caller rate limit', () => {
     const stack = new BffStack(app, 'TestBff', {
       projectName: 'test',
       userPool: auth.userPool,
-      agentRuntimeArn: FAKE_RUNTIME_ARN,
       throttle: { rateLimit: 10, burstLimit: 20 },
       userRateLimit: { limit: 5, windowSeconds: 30 },
-        env,
+      ...upstreamProps(auth),
+      env,
     })
     const template = Template.fromStack(stack)
 
@@ -356,14 +377,180 @@ describe('BffStack — budget', () => {
   })
 })
 
+describe('BffStack — the evidence layer a pilot is asked for', () => {
+  /**
+   * Tracing is the difference between "a user says it broke" and a request an operator can open.
+   * Off by default because X-Ray bills per trace and this template's promise is that an unset
+   * profile costs nothing; the gate in config.ts is what makes that safe rather than the default.
+   */
+  it('records no traces until asked to', () => {
+    const { template } = synthBff()
+
+    for (const fn of Object.values(template.findResources('AWS::Lambda::Function'))) {
+      expect(fn.Properties?.TracingConfig).toBeUndefined()
+    }
+    template.hasResourceProperties('AWS::ApiGateway::Stage', { TracingEnabled: false })
+  })
+
+  it('traces every function and the stage when it is', () => {
+    const { template } = synthBff({ tracingEnabled: true })
+
+    // Enumerated rather than listed by name: a fourth function added later is covered by this test
+    // the day it appears, instead of silently becoming the one blind spot in a trace.
+    const functions = Object.values(template.findResources('AWS::Lambda::Function'))
+    expect(functions).toHaveLength(3)
+    for (const fn of functions) {
+      expect(fn.Properties?.TracingConfig).toEqual({ Mode: 'Active' })
+    }
+
+    // The stage segment is the root: without it the Lambda segments have no parent, and the
+    // gateway's own latency — the half a user actually feels — is missing from every trace.
+    template.hasResourceProperties('AWS::ApiGateway::Stage', { TracingEnabled: true })
+  })
+
+  /**
+   * "Encrypted" and "encrypted under a key we control" are different answers to a pilot's security
+   * review. Enumerated, because a store added later without a key is exactly the regression that
+   * would otherwise go unnoticed.
+   */
+  it('encrypts every log group, table and topic with the deployment key', () => {
+    const { template } = synthBff({ alertEmail: 'ops@example.com' })
+
+    const logGroups = Object.values(template.findResources('AWS::Logs::LogGroup'))
+    expect(logGroups).toHaveLength(4)
+    for (const group of logGroups) {
+      expect(group.Properties?.KmsKeyId).toBe(FAKE_KEY_ARN)
+    }
+
+    const tables = Object.values(template.findResources('AWS::DynamoDB::Table'))
+    expect(tables).toHaveLength(2)
+    for (const table of tables) {
+      expect(table.Properties?.SSESpecification).toMatchObject({ SSEEnabled: true })
+      expect(table.Properties?.SSESpecification?.KMSMasterKeyId).toBe(FAKE_KEY_ARN)
+    }
+
+    // An alarm body names the function and the deployment, so the topic is a store too.
+    template.hasResourceProperties('AWS::SNS::Topic', { KmsMasterKeyId: FAKE_KEY_ARN })
+  })
+
+  /** The index has to expire with the conversations it points at, or the sidebar fills with rows
+   * that open empty. */
+  it('gives the conversation index a TTL rather than letting it accumulate forever', () => {
+    const { template } = synthBff()
+
+    template.hasResourceProperties('AWS::DynamoDB::Table', {
+      TableName: 'test-bff-conversations',
+      TimeToLiveSpecification: { AttributeName: 'expiresAt', Enabled: true },
+    })
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Handler: 'dist/handler.handler',
+      Environment: { Variables: Match.objectLike({ CONVERSATION_RETENTION_DAYS: '30' }) },
+    })
+  })
+})
+
+describe('BffStack — which function can read a conversation', () => {
+  const actions = (statements: PolicyStatement[]) =>
+    statements.flatMap((statement) =>
+      typeof statement.Action === 'string' ? [statement.Action] : (statement.Action ?? []),
+    )
+
+  /**
+   * The reason there is a third function at all. The chat function relays untrusted model output; if
+   * it could also read stored conversations, a compromise there would reach every past turn of every
+   * user rather than the one being served.
+   */
+  it('keeps every conversation read off the function that relays model output', () => {
+    const { template } = synthBff()
+    const chat = actions(statementsForHandler(template, 'dist/handler.handler'))
+
+    expect(chat.sort()).toEqual(
+      [
+        'bedrock-agentcore:InvokeAgentRuntime',
+        'dynamodb:UpdateItem',
+        // The cost of encrypting the tables it writes, not a widening of what it can reach:
+        // DynamoDB uses the customer-managed key as the caller.
+        'kms:Decrypt',
+        'kms:Encrypt',
+        'kms:GenerateDataKey*',
+        'kms:ReEncrypt*',
+      ].sort(),
+    )
+  })
+
+  /** The mirror: the function that can read conversations must not be able to invoke the model. */
+  it('keeps the model out of reach of the function that reads conversations', () => {
+    const { template } = synthBff()
+    const conversations = actions(
+      statementsForHandler(template, 'dist/conversations-handler.handler'),
+    )
+
+    expect(conversations.sort()).toEqual(
+      [
+        'bedrock-agentcore:ListEvents',
+        'bedrock-agentcore:GetEvent',
+        'bedrock-agentcore:DeleteEvent',
+        'dynamodb:Query',
+        'dynamodb:DeleteItem',
+        // Stored events and the index are both encrypted under the deployment key, and both are
+        // read through it by the caller.
+        'kms:Decrypt',
+        'kms:Encrypt',
+        'kms:GenerateDataKey*',
+        'kms:ReEncrypt*',
+      ].sort(),
+    )
+  })
+
+  /**
+   * Recording a turn is the agent's job. A route reachable from a browser that could write history
+   * could also forge it — and a forged transcript is worse than no transcript, because it is
+   * believed.
+   */
+  it('lets no browser-reachable function write conversation history', () => {
+    const { template } = synthBff()
+
+    for (const handler of ['dist/handler.handler', 'dist/conversations-handler.handler', 'dist/admin-handler.handler']) {
+      expect(actions(statementsForHandler(template, handler))).not.toContain(
+        'bedrock-agentcore:CreateEvent',
+      )
+    }
+  })
+
+  /**
+   * A wildcard here would let this function read and erase conversations in any memory resource and
+   * any table in the account — including another deployment sharing it.
+   */
+  it('scopes every conversation grant to this deployment memory and table', () => {
+    const { template } = synthBff()
+
+    for (const statement of statementsForHandler(template, 'dist/conversations-handler.handler')) {
+      // Resources arrive as strings, arrays, or intrinsic objects; comparing the serialized form
+      // catches a wildcard in any of those shapes.
+      expect(JSON.stringify(statement.Resource)).not.toContain('"*"')
+    }
+
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Handler: 'dist/conversations-handler.handler',
+      Environment: {
+        Variables: Match.objectLike({
+          AGENTCORE_MEMORY_ID: FAKE_MEMORY_ID,
+          // A `Ref` to the table, not a literal — the name is resolved at deploy time.
+          CONVERSATION_TABLE_NAME: Match.anyValue(),
+        }),
+      },
+    })
+  })
+})
+
 function synthFrontend() {
   const app = new cdk.App()
   const auth = new AuthStack(app, 'TestAuth', { projectName: 'test', env })
   const bff = new BffStack(app, 'TestBff', {
     projectName: 'test',
     userPool: auth.userPool,
-    agentRuntimeArn: FAKE_RUNTIME_ARN,
     throttle: { rateLimit: 10, burstLimit: 20 },
+    ...upstreamProps(auth),
     env,
   })
   const frontend = new FrontendStack(app, 'TestFrontend', {
@@ -407,15 +594,31 @@ describe('BffStack — every route is authenticated, and the chat role stays nar
 
     expect(rendered).not.toContain('cognito-idp:')
     expect(rendered).not.toContain('secretsmanager')
-    expect(rendered).not.toContain('kms:')
     expect(rendered).not.toContain('sns:Publish')
     expect(rendered).not.toContain('lambda:InvokeFunctionUrl')
 
-    // What it may do, exhaustively: invoke the one runtime, and meter its own caller.
+    // What it may do, exhaustively: invoke the one runtime, meter its own caller, and use the key
+    // those tables are encrypted with. The KMS actions are not a widening of what this role can
+    // reach — DynamoDB uses a customer-managed key *as the caller*, so they are the cost of
+    // encrypting the two tables it already writes.
     const actions = chatStatements
       .flatMap((st) => (Array.isArray(st.Action) ? st.Action : [st.Action]))
       .filter((a) => typeof a === 'string' && !String(a).startsWith('logs:'))
-    expect(actions.sort()).toEqual(['bedrock-agentcore:InvokeAgentRuntime', 'dynamodb:UpdateItem'])
+    expect(actions.sort()).toEqual([
+      'bedrock-agentcore:InvokeAgentRuntime',
+      'dynamodb:UpdateItem',
+      'kms:Decrypt',
+      'kms:Encrypt',
+      'kms:GenerateDataKey*',
+      'kms:ReEncrypt*',
+    ])
+
+    // And the key it may use is *the* key. A wildcard here would reach every key in the account,
+    // including ones protecting stores this function has no business decrypting.
+    for (const statement of chatStatements) {
+      if (!JSON.stringify(statement.Action).includes('kms:')) continue
+      expect(JSON.stringify(statement.Resource)).not.toContain('"*"')
+    }
   })
 })
 

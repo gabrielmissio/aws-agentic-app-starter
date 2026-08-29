@@ -6,7 +6,7 @@ import { defineConfig } from 'tsup'
  * start, and that pins the SDK to whatever AWS ships rather than what was tested.
  */
 export default defineConfig({
-  entry: ['src/handler.ts', 'src/admin-handler.ts'],
+  entry: ['src/handler.ts', 'src/admin-handler.ts', 'src/conversations-handler.ts'],
   format: ['esm'],
   target: 'node22',
   outDir: 'dist',

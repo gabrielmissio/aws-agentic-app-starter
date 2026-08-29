@@ -157,6 +157,9 @@ export interface DeploymentPosture {
   mfa: MfaMode
   threatProtection: ThreatProtectionMode
   retainData: boolean
+  guardrailEnabled: boolean
+  tracingEnabled: boolean
+  conversationRetentionDays?: number
 }
 
 /** One violated rule: what is wrong, and the variable that fixes it. */
@@ -209,6 +212,24 @@ export function assertDeploymentPosture(p: DeploymentPosture): void {
   if (!p.retainData) {
     fail('RETAIN_DATA', 'must be true. A stack replacement would otherwise take every account with it.')
   }
+  if (!p.guardrailEnabled) {
+    fail(
+      'GUARDRAIL_ENABLED',
+      'must be true. Nothing else in this stack inspects what the model is asked or what it answers: IAM bounds who may call it and the system prompt asks it to behave, but neither filters content, redacts PII, nor recognizes a prompt injection.',
+    )
+  }
+  if (!p.tracingEnabled) {
+    fail(
+      'TRACING_ENABLED',
+      'must be true. A wrong answer in a pilot has to be reconstructable across the browser, the BFF and the agent, and without tracing the only thing connecting them is a timestamp.',
+    )
+  }
+  if (!p.conversationRetentionDays) {
+    fail(
+      'CONVERSATION_RETENTION_DAYS',
+      'must be set. Conversations are recorded, so how long they are kept is a decision someone has to make — and this template deliberately does not make it for you.',
+    )
+  }
   if (violations.length === 0) return
 
   throw new Error(
@@ -254,6 +275,52 @@ export function resolveAlertEmail(input?: string): string | undefined {
 
   return trimmed
 }
+
+/**
+ * Whether a Bedrock guardrail filters what the model is asked and what it answers.
+ *
+ * Off unless asked for, in every profile — it is billed per text unit processed, and a default that
+ * silently bills a sandbox is the kind of surprise that makes people distrust the template. The gate
+ * below requires it under `pilot`/`prod`, where "no content filter" stops being an answer anyone
+ * accepts.
+ */
+export function resolveGuardrailEnabled(input?: string): boolean {
+  return parseBoolean(input, false, 'GUARDRAIL_ENABLED')
+}
+
+/**
+ * Whether X-Ray traces the Lambdas and the API stage.
+ *
+ * Off by default for the same reason as the guardrail: tracing is billed per trace recorded, and the
+ * template's promise is that an unset profile costs nothing. Required under `pilot`/`prod`, because
+ * a conversation that went wrong has to be reconstructable across three runtimes.
+ */
+export function resolveTracingEnabled(input?: string): boolean {
+  return parseBoolean(input, false, 'TRACING_ENABLED')
+}
+
+/**
+ * How long a conversation is kept, in days.
+ *
+ * Deliberately has no default under a regulated profile. "How long do you keep what people typed"
+ * is the question a pilot with real data is asked first, and a number this template picked would be
+ * an answer nobody chose. Unset, the gate refuses to synthesize; `demo` falls back to
+ * `DEFAULT_CONVERSATION_RETENTION_DAYS` in the app, since a sandbox holds nothing worth a policy.
+ */
+export function resolveConversationRetentionDays(input?: string): number | undefined {
+  const trimmed = input?.trim()
+  if (!trimmed) return undefined
+
+  const value = Number(trimmed)
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`CONVERSATION_RETENTION_DAYS must be a positive whole number of days: ${input}`)
+  }
+
+  return value
+}
+
+/** What a sandbox gets when it declares nothing. Never reached under `pilot`/`prod`. */
+export const DEFAULT_CONVERSATION_RETENTION_DAYS = 30
 
 /** Ceiling that triggers a budget notification. A budget alerts; it cannot stop spend. */
 export function resolveMonthlyBudgetUsd(input?: string): number | undefined {

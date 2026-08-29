@@ -2,6 +2,7 @@ import * as cdk from 'aws-cdk-lib'
 import * as cognito from 'aws-cdk-lib/aws-cognito'
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb'
 import * as iam from 'aws-cdk-lib/aws-iam'
+import * as kms from 'aws-cdk-lib/aws-kms'
 import * as lambda from 'aws-cdk-lib/aws-lambda'
 import * as logs from 'aws-cdk-lib/aws-logs'
 import * as apigateway from 'aws-cdk-lib/aws-apigateway'
@@ -31,6 +32,17 @@ export interface BffStackProps extends cdk.StackProps {
   monthlyBudgetUsd?: number
   /** Whether a WAF web ACL fronts the API stage. Opt-in in every profile. */
   wafEnabled?: boolean
+  /** The deployment's customer-managed key, created in `AgentStack` and shared with every store. */
+  encryptionKey: kms.IKey
+  /** The AgentCore Memory conversations are recorded in, read by the conversation routes. */
+  memoryId: string
+  memoryArn: string
+  /** TTL on the conversation index. Must match the memory resource's own expiry. */
+  conversationRetentionDays: number
+  /** Whether X-Ray traces the functions and the stage. Required under `pilot`/`prod`. */
+  tracingEnabled?: boolean
+  /** Keeps the conversation index across a stack replacement, as the user pool does. */
+  retainData?: boolean
 }
 
 export class BffStack extends cdk.Stack {
@@ -50,7 +62,21 @@ export class BffStack extends cdk.Stack {
       alertEmail,
       monthlyBudgetUsd,
       wafEnabled = false,
+      encryptionKey,
+      memoryId,
+      memoryArn,
+      conversationRetentionDays,
+      tracingEnabled = false,
+      retainData = true,
     } = props
+
+    /**
+     * Applied to all three functions and to the stage. X-Ray is what turns "the answer was wrong"
+     * into a request you can open: without it the browser, the BFF and the agent share only a
+     * timestamp. Off by default because it is billed per trace — the gate requires it where the
+     * question actually gets asked.
+     */
+    const tracing = tracingEnabled ? lambda.Tracing.ACTIVE : lambda.Tracing.DISABLED
 
     // ── Per-caller rate limit table ─────────────────────────────────────
     // One item per (caller, window); see chatbot-bff/src/rate-limit.ts. Disposable counters, not
@@ -61,6 +87,30 @@ export class BffStack extends cdk.Stack {
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       timeToLiveAttribute: 'expiresAt',
       removalPolicy: cdk.RemovalPolicy.DESTROY,
+      encryption: dynamodb.TableEncryption.CUSTOMER_MANAGED,
+      encryptionKey,
+    })
+
+    // ── Conversation index ──────────────────────────────────────────────
+    // What the sidebar reads: one row per conversation, carrying its title and when it last moved.
+    //
+    // The conversations themselves live in AgentCore Memory. This exists so that listing them costs
+    // one query and touches no message content — a privilege property as much as a performance one,
+    // since the common case never decrypts a transcript. `SessionSummary` from the memory service
+    // carries neither a title nor a last-updated time, which is the other half of the reason.
+    const conversationTable = new dynamodb.Table(this, 'ConversationTable', {
+      tableName: `${projectName}-bff-conversations`,
+      partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'sk', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      // Matched to the memory resource's `eventExpiryDuration` by `conversationRetentionDays`. An
+      // index that outlives its conversations fills the sidebar with rows that open empty.
+      timeToLiveAttribute: 'expiresAt',
+      // Unlike the rate-limit counters, these rows are the user's own data — they name what someone
+      // talked about — so they follow the same retention decision as the user pool.
+      removalPolicy: retainData ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+      encryption: dynamodb.TableEncryption.CUSTOMER_MANAGED,
+      encryptionKey,
     })
 
     // ── Lambda function ────────────────────────────────────────────────
@@ -75,6 +125,7 @@ export class BffStack extends cdk.Stack {
       timeout: cdk.Duration.seconds(60),
       memorySize: 512,
       architecture: lambda.Architecture.X86_64,
+      tracing,
       environment: {
         ALLOWED_ORIGIN: allowedOrigin,
         AGENT_RUNTIME_ARN: agentRuntimeArn,
@@ -82,12 +133,15 @@ export class BffStack extends cdk.Stack {
         RATE_LIMIT_TABLE_NAME: rateLimitTable.tableName,
         USER_RATE_LIMIT: String(userRateLimit.limit),
         USER_RATE_LIMIT_WINDOW_SECONDS: String(userRateLimit.windowSeconds),
+        CONVERSATION_TABLE_NAME: conversationTable.tableName,
+        CONVERSATION_RETENTION_DAYS: String(conversationRetentionDays),
       },
       logGroup: new logs.LogGroup(this, 'ChatFunctionLogs', {
         logGroupName: `/aws/lambda/${projectName}-bff`,
         // A week does not survive an incident found after a weekend.
         retention: logs.RetentionDays.ONE_MONTH,
         removalPolicy: cdk.RemovalPolicy.DESTROY,
+        encryptionKey,
       }),
     })
 
@@ -100,14 +154,29 @@ export class BffStack extends cdk.Stack {
       }),
     )
 
-    // ── IAM: rate-limit table — UpdateItem only, that's the only operation checkRateLimit needs ──
+    // ── IAM: the two tables — UpdateItem only ──────────────────────────
+    // One statement, one action, two resources. `checkRateLimit` and the conversation index are both
+    // conditional upserts, so naming a second table costs this role a *resource*, not a capability —
+    // which is what keeps `keeps every privileged grant off the function that relays model output`
+    // (stacks.test.ts) meaningful as the function grows.
+    //
+    // Note what is absent: no `Query`, no `GetItem`. This function writes the index and never reads
+    // it. Listing and reading conversations is the conversations function's job, and only it can
+    // reach the stored content.
     fn.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: ['dynamodb:UpdateItem'],
-        resources: [rateLimitTable.tableArn],
+        resources: [rateLimitTable.tableArn, conversationTable.tableArn],
       }),
     )
+
+    // Both tables are encrypted with a customer-managed key, and DynamoDB uses it *as the caller* —
+    // so a role holding `UpdateItem` and nothing else gets AccessDenied on the key, not on the
+    // table, which is a confusing way to discover this. The actions mirror what CDK's own
+    // `grantWriteData` pairs with a write, plus `Decrypt`: both writes here are conditional
+    // (`if_not_exists`, the rate-limit check), and a condition reads the item it guards.
+    encryptionKey.grantEncryptDecrypt(fn)
 
     // ── API Gateway REST API ───────────────────────────────────────────
     // `dataTraceEnabled` stays off: it writes request and response bodies to CloudWatch, which
@@ -116,6 +185,7 @@ export class BffStack extends cdk.Stack {
       logGroupName: `/aws/apigateway/${projectName}-chat-api`,
       retention: logs.RetentionDays.ONE_MONTH,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
+      encryptionKey,
     })
 
     const api = new apigateway.RestApi(this, 'ChatApi', {
@@ -123,6 +193,9 @@ export class BffStack extends cdk.Stack {
       deployOptions: {
         stageName: 'prod',
         loggingLevel: apigateway.MethodLoggingLevel.ERROR,
+        // The stage segment is the root of the trace: without it the Lambda's segment has no parent
+        // and the gateway's own latency — the half a user actually feels — is invisible.
+        tracingEnabled,
         // Without this the stage inherits the account's 10k rps, and every request costs tokens.
         throttlingRateLimit: throttle.rateLimit,
         throttlingBurstLimit: throttle.burstLimit,
@@ -145,9 +218,12 @@ export class BffStack extends cdk.Stack {
         // Both this and the Lambdas' ALLOWED_ORIGIN read the same prop, so they cannot drift into
         // a preflight that passes and a response that fails, or the reverse.
         allowOrigins: allowedOrigin === '*' ? apigateway.Cors.ALL_ORIGINS : [allowedOrigin],
-        // GET is here for the admin user listing; the chat route is POST only.
-        allowMethods: ['GET', 'POST', 'OPTIONS'],
-        allowHeaders: ['Content-Type', 'Authorization'],
+        // GET is here for the admin user listing and the conversation routes; DELETE removes one
+        // conversation; the chat route is POST only.
+        allowMethods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
+        // `X-Correlation-Id` must be listed or the browser drops the request at the preflight. It
+        // mirrors `CORS_HEADERS` in chatbot-bff/src/http.ts, which sets the same list on responses.
+        allowHeaders: ['Content-Type', 'Authorization', 'X-Correlation-Id'],
       },
     })
 
@@ -206,6 +282,7 @@ export class BffStack extends cdk.Stack {
       timeout: cdk.Duration.seconds(29),
       memorySize: 256,
       architecture: lambda.Architecture.X86_64,
+      tracing,
       environment: {
         ALLOWED_ORIGIN: allowedOrigin,
         COGNITO_USER_POOL_ID: userPool.userPoolId,
@@ -215,6 +292,7 @@ export class BffStack extends cdk.Stack {
         logGroupName: `/aws/lambda/${projectName}-bff-admin`,
         retention: logs.RetentionDays.ONE_MONTH,
         removalPolicy: cdk.RemovalPolicy.DESTROY,
+        encryptionKey,
       }),
     })
 
@@ -246,12 +324,89 @@ export class BffStack extends cdk.Stack {
       })
     }
 
+    // ── Conversations function ─────────────────────────────────────────
+    // A third function for the same reason there is a second one: this role can read and delete
+    // stored conversation *content*, and the function that relays untrusted model output must not
+    // hold that. The chat function writes the index and nothing else.
+    const conversationsFn = new lambda.Function(this, 'ConversationsFunction', {
+      functionName: `${projectName}-bff-conversations`,
+      code: lambda.Code.fromAsset('../chatbot-bff', {
+        exclude: ['node_modules', 'src', '*.ts', 'tsup.config.*', '.env*'],
+      }),
+      handler: 'dist/conversations-handler.handler',
+      runtime: lambda.Runtime.NODEJS_22_X,
+      timeout: cdk.Duration.seconds(29),
+      memorySize: 256,
+      architecture: lambda.Architecture.X86_64,
+      tracing,
+      environment: {
+        ALLOWED_ORIGIN: allowedOrigin,
+        AGENTCORE_MEMORY_ID: memoryId,
+        CONVERSATION_TABLE_NAME: conversationTable.tableName,
+      },
+      logGroup: new logs.LogGroup(this, 'ConversationsFunctionLogs', {
+        logGroupName: `/aws/lambda/${projectName}-bff-conversations`,
+        retention: logs.RetentionDays.ONE_MONTH,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+        encryptionKey,
+      }),
+    })
+
+    // Scoped to this memory resource, and to reading and erasing — never `CreateEvent`. Recording a
+    // turn is the agent's job; a route reachable from a browser must not be able to write history.
+    conversationsFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'bedrock-agentcore:ListEvents',
+          'bedrock-agentcore:GetEvent',
+          'bedrock-agentcore:DeleteEvent',
+        ],
+        resources: [memoryArn],
+      }),
+    )
+
+    // Query to list, DeleteItem to forget. No `UpdateItem`: this function never renames or reorders
+    // a conversation, so it cannot rewrite what the sidebar says a turn was about.
+    conversationsFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['dynamodb:Query', 'dynamodb:DeleteItem'],
+        resources: [conversationTable.tableArn],
+      }),
+    )
+
+    // Same reason as the chat function above, and for the memory reads as well: stored events are
+    // encrypted under this key, so reading a transcript needs it too.
+    encryptionKey.grantEncryptDecrypt(conversationsFn)
+
+    // ── /conversations and /conversations/{sessionId} ──────────────────
+    const conversationsIntegration = new apigateway.LambdaIntegration(conversationsFn, { proxy: true })
+    const conversations = api.root.addResource('conversations')
+    const conversation = conversations.addResource('{sessionId}')
+
+    conversations.addMethod('GET', conversationsIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    })
+
+    for (const method of ['GET', 'DELETE']) {
+      conversation.addMethod(method, conversationsIntegration, {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      })
+    }
+
     // ── Operations: alarms and a spend ceiling ──────────────────────────
     // Without these you learn the deployment is broken, or expensive, from a user or an invoice.
 
     const alarmTopic = new sns.Topic(this, 'AlarmTopic', {
       topicName: `${projectName}-alarms`,
       displayName: `${projectName} alarms`,
+      // The alarm bodies name the function and the deployment. The key policy in `AgentStack` grants
+      // `cloudwatch.amazonaws.com` what it needs to publish through this key — without that grant an
+      // encrypted topic fails delivery silently, which is the worst way for an alarm to fail.
+      masterKey: encryptionKey,
     })
 
     if (alertEmail) {

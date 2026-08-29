@@ -15,6 +15,10 @@ import {
   resolveAllowedOrigin,
   resolveApiThrottle,
   resolveBedrockModelId,
+  resolveConversationRetentionDays,
+  resolveGuardrailEnabled,
+  resolveTracingEnabled,
+  DEFAULT_CONVERSATION_RETENTION_DAYS,
   resolveDeployProfile,
   resolveExpectedAccount,
   resolveExpectedRegion,
@@ -62,6 +66,14 @@ const profile = resolveDeployProfile(
 const mfa = resolveMfaMode(process.env.COGNITO_MFA)
 const threatProtection = resolveThreatProtection(process.env.COGNITO_THREAT_PROTECTION)
 const wafEnabled = resolveWafEnabled(process.env.WAF_ENABLED)
+const guardrailEnabled = resolveGuardrailEnabled(process.env.GUARDRAIL_ENABLED)
+const tracingEnabled = resolveTracingEnabled(process.env.TRACING_ENABLED)
+// Undefined is a real state here, not a missing default: the gate refuses a `pilot`/`prod` that has
+// not answered "how long do you keep what people typed". Only a sandbox falls through to the
+// template's number, because a sandbox holds nothing worth a policy.
+const declaredRetentionDays = resolveConversationRetentionDays(
+  process.env.CONVERSATION_RETENTION_DAYS,
+)
 
 // Where this stack is allowed to land. Checked before anything is described, so a misdirected
 // deploy fails at synth rather than at the CloudFormation change set.
@@ -97,7 +109,12 @@ assertDeploymentPosture({
   mfa,
   threatProtection,
   retainData,
+  guardrailEnabled,
+  tracingEnabled,
+  conversationRetentionDays: declaredRetentionDays,
 })
+
+const conversationRetentionDays = declaredRetentionDays ?? DEFAULT_CONVERSATION_RETENTION_DAYS
 
 // ── Auth (Cognito User Pool) ───────────────────────────────────────────
 const authStack = new AuthStack(app, `${projectName}-auth`, {
@@ -125,8 +142,19 @@ const agentStack = new AgentStack(app, `${projectName}-agent`, {
   // `BEDROCK_MODEL_ID` is set by the stack itself from `modelId`, not passed through here — the
   // role is scoped to that one model, so the value the container reads and the value IAM allows
   // have to come from the same place.
-  runtimeEnvironment: pickDefinedEnvironment([]),
+  // `OTEL_EXPORTER_OTLP_ENDPOINT` is the one standard variable the agent's telemetry keys off: set
+  // it to a collector the runtime can reach and the container exports spans and token metrics;
+  // leave it unset and those instruments stay silent. It is passed through rather than derived
+  // because where that collector lives is a deployment's decision, not this template's.
+  runtimeEnvironment: pickDefinedEnvironment([
+    'OTEL_EXPORTER_OTLP_ENDPOINT',
+    'OTEL_EXPORTER_OTLP_HEADERS',
+    'MEMORY_MAX_MESSAGES',
+  ]),
   modelId: resolveBedrockModelId(process.env.BEDROCK_MODEL_ID),
+  conversationRetentionDays,
+  guardrailEnabled,
+  retainData,
   env,
 })
 
@@ -141,6 +169,12 @@ const bffStack = new BffStack(app, `${projectName}-bff`, {
   alertEmail,
   monthlyBudgetUsd,
   wafEnabled,
+  encryptionKey: agentStack.encryptionKey,
+  memoryId: agentStack.memoryId,
+  memoryArn: agentStack.memoryArn,
+  conversationRetentionDays,
+  tracingEnabled,
+  retainData,
   env,
 })
 bffStack.addStackDependency(agentStack)

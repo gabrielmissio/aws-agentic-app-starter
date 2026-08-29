@@ -11,16 +11,22 @@ tools, so what you inherit is the scaffolding, not someone else's product.
 
 * A Strands agent on AgentCore Runtime, with a tested pattern for tools that act **for a signed-in
   user without ever accepting a user id**
-* A React chat frontend — streaming replies, Markdown, a small UI kit, i18n (en-US, pt-BR)
+* A React chat frontend — streaming replies, Markdown, a conversation sidebar, a small UI kit,
+  i18n (en-US, pt-BR)
+* **Durable conversations** on AgentCore Memory: history survives a restart, is isolated per user by
+  `actorId`, encrypted with the deployment's own KMS key, and expires on a retention period you
+  declare
 * A Lambda BFF: the only transport to the agent, with per-caller rate limiting and session ids bound
   to the authenticated caller
 * Cognito auth — self sign-up or invite-only behind one env var, optional TOTP, localized emails —
   plus an admin panel for inviting users from the browser
 * CDK infrastructure for all of it, with a **deployment-profile gate** that refuses to synthesize a
   pilot still carrying sandbox defaults
-* Opt-in operational controls: data retention, alarms, an account budget, request throttling, WAF —
-  what a deployment costs and who may reach it. Model output is not filtered; see
-  [what this template leaves open](#what-this-template-leaves-open)
+* An opt-in **Bedrock guardrail** — content filters, prompt-attack detection, PII anonymization —
+  required by the gate under `pilot` and `prod`
+* End-to-end **tracing**: X-Ray on the API stage and every Lambda, OpenTelemetry in the agent, and a
+  correlation id minted by the browser that reaches the stored turn
+* Opt-in operational controls: data retention, alarms, an account budget, request throttling, WAF
 
 ## Quick start
 
@@ -110,11 +116,22 @@ So `DEPLOY_PROFILE=pilot` (or `prod`) turns those notes into a build that refuse
 before a resource is described, naming every violation at once:
 
 ```text
-DEPLOY_PROFILE=pilot refuses 3 sandbox defaults:
+DEPLOY_PROFILE=pilot refuses 8 sandbox defaults:
   - PUBLIC_SIGNUP_ENABLED must be false. Open sign-up lets anyone mint accounts, …
   - ALLOWED_ORIGIN must name the app origin. "*" is the first-deploy default …
   - ALERT_EMAIL is required. The alarms exist either way — without a subscriber …
+  - COGNITO_MFA must be "required". A password alone is one leaked credential away …
+  - COGNITO_THREAT_PROTECTION must be "audit" or "enforced". …
+  - GUARDRAIL_ENABLED must be true. Nothing else in this stack inspects what the model …
+  - TRACING_ENABLED must be true. A wrong answer in a pilot has to be reconstructable …
+  - CONVERSATION_RETENTION_DAYS must be set. Conversations are recorded, so how long …
 ```
+
+The rules fall into two groups. The first five are **access posture** — who can get in and under what
+conditions. The last three are **evidence posture**: whether a deployment can say what the agent
+replied, for how long it is kept, and which turn a user is complaining about. A deployment can
+satisfy every access rule and still be unable to answer any of those three, which is why they are
+gated rather than documented.
 
 `demo` is unchecked on purpose: making the sandbox nag about production posture teaches exactly the
 habit the gate exists to prevent.
@@ -171,20 +188,43 @@ Its invariants are asserted by reading the source instead, which is how the runt
 authorizer configuration and its narrow ECR grant stay covered; add to that suite the same way.
 Rendered React components are not covered, which would need `@testing-library/react` + `jsdom`.
 
+## Conversations
+
+A signed-in user sees their past conversations in a sidebar, opens one, and continues it. Three
+pieces make that work, and they are deliberately separate:
+
+| Piece | Holds | Who can reach it |
+|---|---|---|
+| **AgentCore Memory** | What was said, encrypted with the deployment key, expired by `CONVERSATION_RETENTION_DAYS` | The agent writes; the conversations Lambda reads and deletes |
+| **Conversation index** (DynamoDB) | One row per conversation: title, last activity | The chat Lambda writes; the conversations Lambda reads |
+| **`/conversations` routes** | Nothing — they project the two above | The browser, scoped to the caller |
+
+Rendering the sidebar reads only the index, so opening the app decrypts nobody's messages; a
+transcript is fetched only for the conversation actually opened. The chat Lambda — the one that
+relays untrusted model output — can write the index and invoke the agent, and can read *no* stored
+conversation. `infra/src/__tests__/stacks.test.ts` asserts that separation in both directions.
+
+Isolation is by `actorId`, derived from the caller namespace the BFF prefixes onto every session id.
+Every read into memory names one, so a leaked session id on its own reaches nothing.
+
 ## What this template leaves open
 
-It is scaffolding, not a finished product. Three decisions are deliberately yours:
+It is scaffolding, not a finished product. What is deliberately yours:
 
-* **Conversation history lives in the container's memory** (`agent/src/index.ts`), keyed by session
-  id and evicted after 30 minutes — lost on restart, not shared across replicas. A durable
-  deployment swaps in the Strands SDK's `SessionManager` over a persistent store.
 * **There is no data layer.** [infra/README.md](infra/README.md#where-a-data-layer-goes) covers
   where one goes and the two grant rules to follow.
-* **No Bedrock Guardrail is attached to the model.** What the agent will and will not say is the
-  system prompt alone (`agent/src/agent.ts`) — there is no content filter, no PII redaction and no
-  prompt-attack detection, because the right policy is a function of your domain and every rule
-  bills per request. The controls this template *does* ship are operational, not editorial: they
-  bound what a deployment costs and who may reach it, never what comes back.
+* **The guardrail policy is a starting point.** The filters and PII entities in
+  `infra/src/stacks/agent-stack.ts` are a defensible default, not an answer to your risk register —
+  strengths, denied topics and blocked-message copy are all domain decisions.
+* **The agent runtime has no VPC.** `networkMode: 'PUBLIC'`, so a tool that reaches a backend does so
+  over the internet with IAM as the only boundary. The current toolset makes no outbound calls; the
+  day one does, that decision needs revisiting.
+* **The container's traces need a collector.** X-Ray covers the API stage and the Lambdas from
+  `TRACING_ENABLED` alone, but the agent exports over OTLP and only when
+  `OTEL_EXPORTER_OTLP_ENDPOINT` points somewhere — where that collector lives is a deployment's
+  decision.
+* **There is no CD pipeline.** Deploys run from a developer's machine with ambient credentials, and
+  CI never runs `cdk synth` — so a change that breaks the profile gate still passes CI.
 
 Before a pilot with real users: set `DEPLOY_PROFILE=pilot` and fix what it refuses, pin
 `DEPLOY_ACCOUNT`/`DEPLOY_REGION`, turn on `WAF_ENABLED`, and decide what your tools may reach.

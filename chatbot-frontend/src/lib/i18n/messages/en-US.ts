@@ -107,6 +107,20 @@ export const enUS = {
   'chat.tool.get_current_time': 'Date & time',
   'chat.tool.get_signed_in_user': 'Your account',
 
+  // ── Conversations ───────────────────────────────────────────────────
+  'conversations.title': 'Conversations',
+  'conversations.open': 'Show conversations',
+  'conversations.close': 'Hide conversations',
+  'conversations.newChat': 'New chat',
+  'conversations.empty': 'Your conversations will appear here once you start one.',
+  'conversations.delete': 'Delete “{title}”',
+  'conversations.deleteConfirm': 'Delete “{title}”? This cannot be undone.',
+  'conversations.retentionNote': 'Conversations are kept for a limited time, then deleted.',
+  'conversations.loadFailed': 'Could not load your conversations.',
+  'conversations.openFailed': 'Could not open that conversation.',
+  'conversations.deleteFailed': 'Could not delete that conversation.',
+  'conversations.restored': 'Earlier messages in this conversation.',
+
   // ── Admin panel ─────────────────────────────────────────────────────
   'admin.title': 'Admin',
   'admin.subtitle': 'Manage who can sign in',
