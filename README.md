@@ -38,13 +38,24 @@ Docker with Buildx, AWS credentials, and access to AgentCore Runtime and to the 
 `BEDROCK_MODEL_ID`.
 
 ```bash
-npm run bootstrap
-cp infra/.env.example infra/.env   # set PROJECT_NAME — it prefixes every resource
+npm run bootstrap                       # installs the root package and all four subpackages
+cp infra/.env.example infra/.env        # set PROJECT_NAME — it prefixes every resource
+npm --prefix infra run cdk -- bootstrap # CDK's own bootstrap: once per account+region
 npm run deploy
 ```
 
-`deploy` builds the app artifacts and deploys the four stacks. See
-[infra/README.md](infra/README.md) for what each variable does.
+The two `bootstrap`s are unrelated: the first installs dependencies, the third provisions the CDK
+toolkit stack this account and region needs before it can take an asset. Skip it if the target is
+already CDK-bootstrapped; run it against the same account and region you are deploying to.
+
+The defaults in `.env.example` deploy a working sandbox — `us-east-1`, `DEPLOY_PROFILE=demo`, self
+sign-up on — so `PROJECT_NAME` is the only value a first deploy has to set. `deploy` builds the app
+artifacts and deploys the four stacks, pausing for confirmation on any change that widens IAM.
+
+When it finishes, the `frontend` stack outputs `DistributionUrl`. Open it, create an account, and the
+agent answers. To make that account an admin, see
+[infra/README.md](infra/README.md#managing-users-and-admins); for what every variable does, see
+[infra/.env.example](infra/.env.example).
 
 ## Architecture
 
@@ -117,36 +128,27 @@ URL does not exist yet on a first deploy).
 
 ### Deployment profiles
 
-The template ships sandbox defaults on purpose — open sign-up, open CORS, no second factor — each
-documented as sandbox-only. Documentation is the control that fails here: whoever copies this repo
-to run a pilot is not whoever read the comment.
+`DEPLOY_PROFILE` decides how much the build insists on. **`demo` is the default and is never
+checked** — the sandbox defaults are precisely what it exists for, so a first deploy needs nothing
+here.
 
-So `DEPLOY_PROFILE=pilot` (or `prod`) turns those notes into a build that refuses. `cdk synth` fails
-before a resource is described, naming every violation at once:
+`pilot` and `prod` turn those sandbox notes into a build that refuses. Documentation is the control
+that fails at this job: whoever copies this repo to run a pilot is not whoever read the comment. So
+`cdk synth` fails before a resource is described, naming every violation at once:
 
 ```text
 DEPLOY_PROFILE=pilot refuses 9 sandbox defaults:
   - PUBLIC_SIGNUP_ENABLED must be false. Open sign-up lets anyone mint accounts, …
-  - ALLOWED_ORIGIN must name the app origin. "*" is the first-deploy default …
-  - ALERT_EMAIL is required. The alarms exist either way — without a subscriber …
   - COGNITO_MFA must be "required". A password alone is one leaked credential away …
-  - COGNITO_THREAT_PROTECTION must be "audit" or "enforced". …
-  - RETAIN_DATA must be true. A stack replacement would otherwise take every account with it. …
   - GUARDRAIL_ENABLED must be true. Nothing else in this stack inspects what the model …
-  - TRACING_ENABLED must be true. A wrong answer in a pilot has to be reconstructable …
-  - CONVERSATION_RETENTION_DAYS must be set. Conversations are recorded, so how long …
+  … and six more, each naming its variable and the reason it is refused
 ```
 
-The rules fall into three groups. Five are **access posture** — who can get in and under what
-conditions: open sign-up, the CORS origin, an alarm subscriber, a second factor, and threat
-protection. One is **durability**: `RETAIN_DATA`, so a stack replacement cannot take every account
-with it. The last three are **evidence posture** — whether a deployment can say what the agent
-replied, for how long it is kept, and which turn a user is complaining about. A deployment can
-satisfy every access rule and still be unable to answer any of those three, which is why they are
-gated rather than documented.
-
-`demo` is unchecked on purpose: making the sandbox nag about production posture teaches exactly the
-habit the gate exists to prevent.
+Five of the nine are **access posture** — sign-up, CORS origin, alarm subscriber, second factor,
+threat protection. One is **durability**: `RETAIN_DATA`. The last three are **evidence posture** —
+whether a deployment can say what the agent replied, how long it is kept, and which turn a user is
+complaining about. A deployment can satisfy every access rule and still answer none of those three,
+which is why they are gated rather than documented.
 
 ## Local development
 
