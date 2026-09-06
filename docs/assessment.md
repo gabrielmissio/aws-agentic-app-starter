@@ -143,8 +143,9 @@ the wide hole of the first issue.
 
 **The profile gate does real work** (`infra/src/config.ts`, `assertDeploymentPosture`). With
 `DEPLOY_PROFILE=pilot`, `cdk synth` fails before any resource is described, listing **every**
-violation at once. There are **nine** rules now — the six original *access posture* rules plus three
-*evidence posture* rules added since the original issue:
+violation at once. There are **nine** rules now — the six from the original issue (five of *access
+posture*, one of *durability*: `RETAIN_DATA`) plus three of *evidence posture* added since. That is
+the same grouping the root README uses:
 
 - `PUBLIC_SIGNUP_ENABLED` must be `false`
 - `ALLOWED_ORIGIN` may not be `*`

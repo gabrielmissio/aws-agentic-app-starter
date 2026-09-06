@@ -33,8 +33,9 @@ users — not someone else's product.
 
 ## Quick start
 
-Needs Node 22+, npm 10+, Docker with Buildx, AWS credentials, and access to AgentCore Runtime and to
-the model in `BEDROCK_MODEL_ID`.
+Needs Node 22+, npm 10+ (declared in `engines`; `.nvmrc` pins the major, so `nvm use` picks it up),
+Docker with Buildx, AWS credentials, and access to AgentCore Runtime and to the model in
+`BEDROCK_MODEL_ID`.
 
 ```bash
 npm run bootstrap
@@ -77,8 +78,9 @@ Cognito, and that nothing else grants `InvokeAgentRuntime`, so it cannot happen 
 ```text
 agent/               Strands agent runtime, its toolset, and the image build
 chatbot-frontend/    React + Vite chat UI, admin panel, UI kit and i18n
-chatbot-bff/         Lambda BFF: the chat proxy and the admin routes
+chatbot-bff/         Lambda BFF: the chat proxy, the admin and conversation routes
 infra/               AWS CDK app for auth, the runtime, the BFF and hosting
+docs/                Long-form documentation — the engineering assessment
 ```
 
 Each has its own README: [agent](agent/README.md) · [frontend](chatbot-frontend/README.md) ·
