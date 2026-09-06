@@ -239,6 +239,15 @@ It is scaffolding, not a finished product. What is deliberately yours:
 Before a pilot with real users: set `DEPLOY_PROFILE=pilot` and fix what it refuses, pin
 `DEPLOY_ACCOUNT`/`DEPLOY_REGION`, turn on `WAF_ENABLED`, and decide what your tools may reach.
 
+## Contributing
+
+Setup, the checks a pull request has to pass, and what belongs in this template rather than in your
+fork: [CONTRIBUTING.md](CONTRIBUTING.md). Participation is governed by the
+[Code of Conduct](CODE_OF_CONDUCT.md).
+
+Found a security flaw? Report it privately — [SECURITY.md](SECURITY.md) explains what is in scope,
+and why a `demo` default the profile gate already refuses is a design decision rather than a finding.
+
 ## License
 
 [MIT](LICENSE). Use it, fork it, ship it commercially — no attribution beyond keeping the copyright

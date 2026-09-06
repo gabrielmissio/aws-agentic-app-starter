@@ -1,0 +1,42 @@
+name: Proposal
+description: Suggest a change to what the template ships
+labels: ["proposal"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is scaffolding, not a product. The best proposals close something in
+        [What this template leaves open](../blob/main/README.md#what-this-template-leaves-open) or
+        tighten an existing default. A new feature in the example domain is a harder sell — every
+        feature added to the example is one more thing a fork has to delete.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What does a fork have to do today, and what does that cost them? Describe the situation, not the solution.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you propose
+      description: What would ship, and what a fork inherits from it — a new default, a new required variable, a widened grant.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you considered instead
+      description: Including leaving it to the fork and documenting it. That is often the right answer here.
+
+  - type: checkboxes
+    id: gate
+    attributes:
+      label: Does this touch the deployment-profile gate?
+      options:
+        - label: This adds, removes or changes a rule in `infra/src/config.ts`
+        - label: This changes an IAM grant or an encryption setting
+        - label: Neither

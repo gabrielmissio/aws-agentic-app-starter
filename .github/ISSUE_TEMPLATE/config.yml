@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/gabrielmissio/aws-agentic-app-starter/security/advisories/new
+    about: Report privately, never as an issue. See SECURITY.md for what is in scope.
+  - name: Configuration reference
+    url: https://github.com/gabrielmissio/aws-agentic-app-starter/blob/main/infra/.env.example
+    about: Every variable, what it bills for, and whether the profile gate refuses it.
+  - name: AWS service issue
+    url: https://aws.amazon.com/contact-us/
+    about: Bedrock, AgentCore or Cognito behaving unexpectedly is a matter for AWS, not this template.
