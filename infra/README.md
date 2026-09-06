@@ -36,7 +36,7 @@ stale `export PROJECT_NAME=…` in your shell silently wins over `.env` and depl
 resource and the KMS key it creates are what the conversation routes read and every store in `bff` is
 encrypted with; `bff` before `frontend` because `config.js` carries the API URL. `agent` needs
 nothing from `auth` — see
-[Why the BFF is the only transport](../README.md#why-the-bff-is-the-only-transport) for why that is
+[Why the BFF is the only transport](../chatbot-bff/README.md#why-the-bff-is-the-only-transport) for why that is
 the point rather than an oversight.
 
 ### One key for the whole deployment

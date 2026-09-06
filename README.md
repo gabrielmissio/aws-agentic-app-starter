@@ -1,49 +1,54 @@
 # Agentic apps on AWS
 
-A complete, deployable agentic application on AWS. A Strands agent in TypeScript
-on Amazon Bedrock AgentCore Runtime, fronted by a React chat UI and reached through one pattern,
-**Frontend → BFF → AgentCore Runtime**, with authentication, durable per-user conversations, user
-management, cost and abuse controls, content guardrails, end-to-end tracing, and the CDK
-infrastructure for all of it already in place.
+Putting an agent in front of real users takes far more than the agent. This is the rest of it,
+deployable in one command.
 
-The domain is deliberately thin. The agent is a general-purpose personal assistant with two example
-tools, so what you inherit is the scaffolding — the hard parts of putting an agent in front of real
-users — not someone else's product.
+A Strands agent on Amazon Bedrock AgentCore Runtime, a React chat UI, and a Lambda BFF between them —
+with Cognito auth, durable per-user conversations, content guardrails, per-caller quotas, end-to-end
+tracing and the CDK for all of it already written and tested.
+
+The domain is deliberately thin: a general-purpose assistant with two example tools. What you inherit
+is the scaffolding, not someone else's product.
 
 ## What you get
 
-* A Strands agent on AgentCore Runtime, with a tested pattern for tools that act **for a signed-in
-  user without ever accepting a user id**
-* A React chat frontend — streaming replies, Markdown, a conversation sidebar, a small UI kit,
-  i18n (en-US, pt-BR)
-* **Durable conversations** on AgentCore Memory: history survives a restart, is isolated per user by
-  `actorId`, encrypted with the deployment's own KMS key, and expires on a retention period you
-  declare
-* A Lambda BFF: the only transport to the agent, with per-caller rate limiting and session ids bound
-  to the authenticated caller
-* Cognito auth — self sign-up or invite-only behind one env var, optional TOTP, localized emails —
-  plus an admin panel for inviting users from the browser
-* CDK infrastructure for all of it, with a **deployment-profile gate** that refuses to synthesize a
-  pilot still carrying sandbox defaults
-* An opt-in **Bedrock guardrail** — content filters, prompt-attack detection, PII anonymization —
-  required by the gate under `pilot` and `prod`
-* End-to-end **tracing**: X-Ray on the API stage and every Lambda, OpenTelemetry in the agent, and a
-  correlation id minted by the browser that reaches the stored turn
-* Opt-in operational controls: data retention, alarms, an account budget, request throttling, WAF
+| | |
+|---|---|
+| **Agent** | Strands on AgentCore Runtime. Its tools act for the signed-in user **without ever accepting a user id** — asserted over the whole toolset |
+| **Chat UI** | React + Vite: streaming replies, Markdown, a conversation sidebar, an admin panel, a small UI kit, i18n (en-US, pt-BR) |
+| **Transport** | A Lambda BFF, the only path to the agent — per-caller quotas, and session ids bound to the authenticated caller |
+| **Conversations** | Durable on AgentCore Memory: survives a restart, isolated per user by `actorId`, encrypted with the deployment's own KMS key, expired on a retention you declare |
+| **Auth** | Cognito — self sign-up or invite-only behind one variable, optional TOTP, localized emails, and admin invites from the browser |
+| **Safety** | An opt-in Bedrock guardrail: content filters, prompt-attack detection, PII anonymization. Required under `pilot` and `prod` |
+| **Evidence** | X-Ray on the API stage and every Lambda, OpenTelemetry in the agent, and a correlation id minted in the browser that reaches the stored turn |
+| **Infrastructure** | Four CDK stacks, and a **deployment-profile gate** that refuses to synthesize a pilot still carrying sandbox defaults |
+| **Controls** | Retention, alarms, an account budget, stage throttling, an optional WAF — each off by default, each documented with what it bills for |
 
 ## Quick start
 
-Needs Node 22+, npm 10+, Docker with Buildx, AWS credentials, and access to AgentCore Runtime and to
-the model in `BEDROCK_MODEL_ID`.
+Needs Node 22+, npm 10+ (declared in `engines`; `.nvmrc` pins the major, so `nvm use` picks it up),
+Docker with Buildx, AWS credentials, and access to AgentCore Runtime and to the model in
+`BEDROCK_MODEL_ID`.
 
 ```bash
-npm run bootstrap
-cp infra/.env.example infra/.env   # set PROJECT_NAME — it prefixes every resource
+npm run bootstrap                       # installs the root package and all four subpackages
+cp infra/.env.example infra/.env        # set PROJECT_NAME — it prefixes every resource
+npm --prefix infra run cdk -- bootstrap # CDK's own bootstrap: once per account+region
 npm run deploy
 ```
 
-`deploy` builds the app artifacts and deploys the four stacks. See
-[infra/README.md](infra/README.md) for what each variable does.
+The two `bootstrap`s are unrelated: the first installs dependencies, the third provisions the CDK
+toolkit stack this account and region needs before it can take an asset. Skip it if the target is
+already CDK-bootstrapped; run it against the same account and region you are deploying to.
+
+The defaults in `.env.example` deploy a working sandbox — `us-east-1`, `DEPLOY_PROFILE=demo`, self
+sign-up on — so `PROJECT_NAME` is the only value a first deploy has to set. `deploy` builds the app
+artifacts and deploys the four stacks, pausing for confirmation on any change that widens IAM.
+
+When it finishes, the `frontend` stack outputs `DistributionUrl`. Open it, create an account, and the
+agent answers. To make that account an admin, see
+[infra/README.md](infra/README.md#managing-users-and-admins); for what every variable does, see
+[infra/.env.example](infra/.env.example).
 
 ## Architecture
 
@@ -57,36 +62,29 @@ authorizer validates it and hands the verified claims to the Lambda; the BFF inv
 SigV4 and re-streams the response. (The diagram's right-hand side shows where external tool
 integrations attach — this template ships two in-process ones and no external ones.)
 
-### Why the BFF is the only transport
-
-This generalizes to any agent that acts for a user, so it is worth stating once.
-
-No tool takes a user id — an identity a model can pass is one a prompt can talk it into changing.
-The agent learns who is asking from a block the BFF prepends to the prompt, built from claims the
-authorizer already verified. That block is **plain text**, so it is only as trustworthy as whoever
-could have written it. The runtime therefore carries no authorizer configuration: it accepts SigV4
-alone, the BFF's role is the only principal granted `InvokeAgentRuntime`, and there is no Cognito
-identity pool, so a signed-in browser holds a token and no AWS credentials at all.
-
-Give the browser a direct path and that block becomes a request body any signed-in user can compose.
-`infra/src/__tests__/stacks.test.ts` asserts the pool is absent, that no role is federated to
-Cognito, and that nothing else grants `InvokeAgentRuntime`, so it cannot happen by accident.
+The BFF is the only path to the agent, and that is a security boundary rather than a layering
+preference — [chatbot-bff/README.md](chatbot-bff/README.md#why-the-bff-is-the-only-transport) sets
+out why, and which tests hold it in place.
 
 ## Repository structure
 
 ```text
 agent/               Strands agent runtime, its toolset, and the image build
 chatbot-frontend/    React + Vite chat UI, admin panel, UI kit and i18n
-chatbot-bff/         Lambda BFF: the chat proxy and the admin routes
+chatbot-bff/         Lambda BFF: the chat proxy, the admin and conversation routes
 infra/               AWS CDK app for auth, the runtime, the BFF and hosting
+docs/                Long-form documentation — the engineering assessment
 ```
 
 Each has its own README: [agent](agent/README.md) · [frontend](chatbot-frontend/README.md) ·
 [bff](chatbot-bff/README.md) · [infra](infra/README.md).
 
+Adapting this template with a coding agent? [AGENTS.md](AGENTS.md) tells it which parts are example
+domain to replace and which are the scaffolding to preserve, with the test that guards each one.
+
 An independent engineering assessment — readiness for demos, closed pilots with sensitive data, and
 public production, scored by dimension with a prioritized backlog — is in
-[assessment.md](assessment.md).
+[docs/assessment.md](docs/assessment.md).
 
 ## Making it yours
 
@@ -115,36 +113,27 @@ URL does not exist yet on a first deploy).
 
 ### Deployment profiles
 
-The template ships sandbox defaults on purpose — open sign-up, open CORS, no second factor — each
-documented as sandbox-only. Documentation is the control that fails here: whoever copies this repo
-to run a pilot is not whoever read the comment.
+`DEPLOY_PROFILE` decides how much the build insists on. **`demo` is the default and is never
+checked** — the sandbox defaults are precisely what it exists for, so a first deploy needs nothing
+here.
 
-So `DEPLOY_PROFILE=pilot` (or `prod`) turns those notes into a build that refuses. `cdk synth` fails
-before a resource is described, naming every violation at once:
+`pilot` and `prod` turn those sandbox notes into a build that refuses. Documentation is the control
+that fails at this job: whoever copies this repo to run a pilot is not whoever read the comment. So
+`cdk synth` fails before a resource is described, naming every violation at once:
 
 ```text
 DEPLOY_PROFILE=pilot refuses 9 sandbox defaults:
   - PUBLIC_SIGNUP_ENABLED must be false. Open sign-up lets anyone mint accounts, …
-  - ALLOWED_ORIGIN must name the app origin. "*" is the first-deploy default …
-  - ALERT_EMAIL is required. The alarms exist either way — without a subscriber …
   - COGNITO_MFA must be "required". A password alone is one leaked credential away …
-  - COGNITO_THREAT_PROTECTION must be "audit" or "enforced". …
-  - RETAIN_DATA must be true. A stack replacement would otherwise take every account with it. …
   - GUARDRAIL_ENABLED must be true. Nothing else in this stack inspects what the model …
-  - TRACING_ENABLED must be true. A wrong answer in a pilot has to be reconstructable …
-  - CONVERSATION_RETENTION_DAYS must be set. Conversations are recorded, so how long …
+  … and six more, each naming its variable and the reason it is refused
 ```
 
-The rules fall into three groups. Five are **access posture** — who can get in and under what
-conditions: open sign-up, the CORS origin, an alarm subscriber, a second factor, and threat
-protection. One is **durability**: `RETAIN_DATA`, so a stack replacement cannot take every account
-with it. The last three are **evidence posture** — whether a deployment can say what the agent
-replied, for how long it is kept, and which turn a user is complaining about. A deployment can
-satisfy every access rule and still be unable to answer any of those three, which is why they are
-gated rather than documented.
-
-`demo` is unchecked on purpose: making the sandbox nag about production posture teaches exactly the
-habit the gate exists to prevent.
+Five of the nine are **access posture** — sign-up, CORS origin, alarm subscriber, second factor,
+threat protection. One is **durability**: `RETAIN_DATA`. The last three are **evidence posture** —
+whether a deployment can say what the agent replied, how long it is kept, and which turn a user is
+complaining about. A deployment can satisfy every access rule and still answer none of those three,
+which is why they are gated rather than documented.
 
 ## Local development
 
@@ -238,3 +227,19 @@ It is scaffolding, not a finished product. What is deliberately yours:
 
 Before a pilot with real users: set `DEPLOY_PROFILE=pilot` and fix what it refuses, pin
 `DEPLOY_ACCOUNT`/`DEPLOY_REGION`, turn on `WAF_ENABLED`, and decide what your tools may reach.
+
+## Contributing
+
+Setup, the checks a pull request has to pass, and what belongs in this template rather than in your
+fork: [CONTRIBUTING.md](CONTRIBUTING.md). Participation is governed by the
+[Code of Conduct](CODE_OF_CONDUCT.md).
+
+Found a security flaw? Report it privately — [SECURITY.md](SECURITY.md) explains what is in scope,
+and why a `demo` default the profile gate already refuses is a design decision rather than a finding.
+
+## License
+
+[MIT](LICENSE). Use it, fork it, ship it commercially — no attribution beyond keeping the copyright
+notice in copies of the source. It is provided **as is**, without warranty of any kind, and the
+authors carry no liability for what it does in your account: the deployment profiles, guardrail
+policy, and IAM grants are defaults to review, not guarantees.
