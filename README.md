@@ -97,6 +97,9 @@ docs/                Long-form documentation — the engineering assessment
 Each has its own README: [agent](agent/README.md) · [frontend](chatbot-frontend/README.md) ·
 [bff](chatbot-bff/README.md) · [infra](infra/README.md).
 
+Adapting this template with a coding agent? [AGENTS.md](AGENTS.md) tells it which parts are example
+domain to replace and which are the scaffolding to preserve, with the test that guards each one.
+
 An independent engineering assessment — readiness for demos, closed pilots with sensitive data, and
 public production, scored by dimension with a prioritized backlog — is in
 [docs/assessment.md](docs/assessment.md).

@@ -86,6 +86,10 @@ Harder sell: a new feature in the example domain. The agent is a deliberately th
 assistant with two example tools — the value is the scaffolding around it, and every feature added to
 the example is one more thing a fork has to delete.
 
+**This applies to contributions back to this template, not to your fork.** Adapting the template to a
+real domain means replacing the example wholesale — that is what it is for. [AGENTS.md](AGENTS.md)
+draws that line for a coding agent.
+
 ## Licensing
 
 By contributing, you agree your contribution is licensed under the [MIT License](LICENSE), the same
