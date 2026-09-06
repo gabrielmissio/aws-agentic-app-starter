@@ -238,3 +238,10 @@ It is scaffolding, not a finished product. What is deliberately yours:
 
 Before a pilot with real users: set `DEPLOY_PROFILE=pilot` and fix what it refuses, pin
 `DEPLOY_ACCOUNT`/`DEPLOY_REGION`, turn on `WAF_ENABLED`, and decide what your tools may reach.
+
+## License
+
+[MIT](LICENSE). Use it, fork it, ship it commercially — no attribution beyond keeping the copyright
+notice in copies of the source. It is provided **as is**, without warranty of any kind, and the
+authors carry no liability for what it does in your account: the deployment profiles, guardrail
+policy, and IAM grants are defaults to review, not guarantees.

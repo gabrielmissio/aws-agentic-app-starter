@@ -1,6 +1,7 @@
 {
   "name": "aws-agentic-app-starter",
   "version": "1.0.0",
+  "license": "MIT",
   "private": true,
   "scripts": {
     "bootstrap": "npm ci --ignore-scripts && npm --prefix ./agent ci && npm --prefix ./chatbot-bff ci && npm --prefix ./chatbot-frontend ci && npm --prefix ./infra ci",
