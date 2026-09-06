@@ -46,7 +46,7 @@ an access token (the full reasoning sits next to the authorizer in `infra/src/st
 
 The browser never calls AgentCore, and holds no AWS credentials: Amplify is configured with the user
 pool alone, no identity pool. See
-[Why the BFF is the only transport](../README.md#why-the-bff-is-the-only-transport).
+[Why the BFF is the only transport](../chatbot-bff/README.md#why-the-bff-is-the-only-transport).
 
 `VITE_PUBLIC_SIGNUP_ENABLED` (mirroring `PUBLIC_SIGNUP_ENABLED` in `infra/`) switches
 [`AuthScreen`](src/components/AuthScreen.tsx) between self sign-up and invite-only, where the first

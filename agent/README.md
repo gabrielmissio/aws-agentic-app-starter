@@ -83,7 +83,7 @@ tool reads it with `currentCaller()`. The schemas the model sees carry no user i
 
 That is safe because of the *transport*, not the parser: the runtime carries no authorizer config,
 so it accepts SigV4 alone and the BFF's role is its only caller. See
-[Why the BFF is the only transport](../README.md#why-the-bff-is-the-only-transport).
+[Why the BFF is the only transport](../chatbot-bff/README.md#why-the-bff-is-the-only-transport).
 
 ### A tool that reaches a backend
 

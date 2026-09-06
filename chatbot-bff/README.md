@@ -26,13 +26,29 @@ path, not the authorization one.
 deployed Lambdas by `infra/src/stacks/bff-stack.ts` and are absent from it on purpose: `local.ts` has
 no admin routes to exercise and no DynamoDB table to point at.
 
+## Why the BFF is the only transport
+
+No tool takes a user id — an identity a model can pass is one a prompt can talk it into changing.
+The agent learns who is asking from a block this BFF prepends to the prompt, built from claims the
+authorizer already verified. That block is **plain text**, so it is only as trustworthy as whoever
+could have written it. The runtime therefore carries no authorizer configuration: it accepts SigV4
+alone, this function's role is the only principal granted `InvokeAgentRuntime`, and there is no
+Cognito identity pool, so a signed-in browser holds a token and no AWS credentials at all.
+
+Give the browser a direct path and that block becomes a request body any signed-in user can compose.
+`infra/src/__tests__/stacks.test.ts` asserts the pool is absent, that no role is federated to
+Cognito, and that nothing else grants `InvokeAgentRuntime`, so it cannot happen by accident.
+
+This generalizes to any agent that acts for a user, which is why it is stated once here rather than
+repeated per package.
+
 ## What it guarantees
 
-- **It is the only transport to the agent.** It prepends a block naming the caller it authenticated
-  (`withSessionContext` in [`src/session-context.ts`](src/session-context.ts)), built from claims the
-  gateway authorizer already verified — that is how the agent's tools act for a user without any tool
-  accepting a user id. The wire format is a contract with `agent/src/caller.ts`, asserted literally
-  on both sides because the packages cannot share it by import.
+- **The identity block is a contract with the agent.** `withSessionContext`
+  ([`src/session-context.ts`](src/session-context.ts)) builds it from the claims the authorizer
+  verified. Its wire format is asserted literally on both sides — here and in `agent/src/caller.ts` —
+  because the two packages cannot share it by import, so drift fails the build instead of silently
+  detaching the agent from its caller.
 - **Session ids are namespaced to the caller's `sub`** ([`src/session.ts`](src/session.ts)). A
   client-supplied id is honoured only if it carries *that* caller's namespace. A session id is a
   bearer token for AgentCore conversation history, so without this any signed-in user could replay

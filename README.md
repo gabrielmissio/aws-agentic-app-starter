@@ -1,35 +1,28 @@
 # Agentic apps on AWS
 
-A complete, deployable agentic application on AWS. A Strands agent in TypeScript
-on Amazon Bedrock AgentCore Runtime, fronted by a React chat UI and reached through one pattern,
-**Frontend → BFF → AgentCore Runtime**, with authentication, durable per-user conversations, user
-management, cost and abuse controls, content guardrails, end-to-end tracing, and the CDK
-infrastructure for all of it already in place.
+Putting an agent in front of real users takes far more than the agent. This is the rest of it,
+deployable in one command.
 
-The domain is deliberately thin. The agent is a general-purpose personal assistant with two example
-tools, so what you inherit is the scaffolding — the hard parts of putting an agent in front of real
-users — not someone else's product.
+A Strands agent on Amazon Bedrock AgentCore Runtime, a React chat UI, and a Lambda BFF between them —
+with Cognito auth, durable per-user conversations, content guardrails, per-caller quotas, end-to-end
+tracing and the CDK for all of it already written and tested.
+
+The domain is deliberately thin: a general-purpose assistant with two example tools. What you inherit
+is the scaffolding, not someone else's product.
 
 ## What you get
 
-* A Strands agent on AgentCore Runtime, with a tested pattern for tools that act **for a signed-in
-  user without ever accepting a user id**
-* A React chat frontend — streaming replies, Markdown, a conversation sidebar, a small UI kit,
-  i18n (en-US, pt-BR)
-* **Durable conversations** on AgentCore Memory: history survives a restart, is isolated per user by
-  `actorId`, encrypted with the deployment's own KMS key, and expires on a retention period you
-  declare
-* A Lambda BFF: the only transport to the agent, with per-caller rate limiting and session ids bound
-  to the authenticated caller
-* Cognito auth — self sign-up or invite-only behind one env var, optional TOTP, localized emails —
-  plus an admin panel for inviting users from the browser
-* CDK infrastructure for all of it, with a **deployment-profile gate** that refuses to synthesize a
-  pilot still carrying sandbox defaults
-* An opt-in **Bedrock guardrail** — content filters, prompt-attack detection, PII anonymization —
-  required by the gate under `pilot` and `prod`
-* End-to-end **tracing**: X-Ray on the API stage and every Lambda, OpenTelemetry in the agent, and a
-  correlation id minted by the browser that reaches the stored turn
-* Opt-in operational controls: data retention, alarms, an account budget, request throttling, WAF
+| | |
+|---|---|
+| **Agent** | Strands on AgentCore Runtime. Its tools act for the signed-in user **without ever accepting a user id** — asserted over the whole toolset |
+| **Chat UI** | React + Vite: streaming replies, Markdown, a conversation sidebar, an admin panel, a small UI kit, i18n (en-US, pt-BR) |
+| **Transport** | A Lambda BFF, the only path to the agent — per-caller quotas, and session ids bound to the authenticated caller |
+| **Conversations** | Durable on AgentCore Memory: survives a restart, isolated per user by `actorId`, encrypted with the deployment's own KMS key, expired on a retention you declare |
+| **Auth** | Cognito — self sign-up or invite-only behind one variable, optional TOTP, localized emails, and admin invites from the browser |
+| **Safety** | An opt-in Bedrock guardrail: content filters, prompt-attack detection, PII anonymization. Required under `pilot` and `prod` |
+| **Evidence** | X-Ray on the API stage and every Lambda, OpenTelemetry in the agent, and a correlation id minted in the browser that reaches the stored turn |
+| **Infrastructure** | Four CDK stacks, and a **deployment-profile gate** that refuses to synthesize a pilot still carrying sandbox defaults |
+| **Controls** | Retention, alarms, an account budget, stage throttling, an optional WAF — each off by default, each documented with what it bills for |
 
 ## Quick start
 
@@ -69,20 +62,9 @@ authorizer validates it and hands the verified claims to the Lambda; the BFF inv
 SigV4 and re-streams the response. (The diagram's right-hand side shows where external tool
 integrations attach — this template ships two in-process ones and no external ones.)
 
-### Why the BFF is the only transport
-
-This generalizes to any agent that acts for a user, so it is worth stating once.
-
-No tool takes a user id — an identity a model can pass is one a prompt can talk it into changing.
-The agent learns who is asking from a block the BFF prepends to the prompt, built from claims the
-authorizer already verified. That block is **plain text**, so it is only as trustworthy as whoever
-could have written it. The runtime therefore carries no authorizer configuration: it accepts SigV4
-alone, the BFF's role is the only principal granted `InvokeAgentRuntime`, and there is no Cognito
-identity pool, so a signed-in browser holds a token and no AWS credentials at all.
-
-Give the browser a direct path and that block becomes a request body any signed-in user can compose.
-`infra/src/__tests__/stacks.test.ts` asserts the pool is absent, that no role is federated to
-Cognito, and that nothing else grants `InvokeAgentRuntime`, so it cannot happen by accident.
+The BFF is the only path to the agent, and that is a security boundary rather than a layering
+preference — [chatbot-bff/README.md](chatbot-bff/README.md#why-the-bff-is-the-only-transport) sets
+out why, and which tests hold it in place.
 
 ## Repository structure
 
