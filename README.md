@@ -86,7 +86,7 @@ Each has its own README: [agent](agent/README.md) · [frontend](chatbot-frontend
 
 An independent engineering assessment — readiness for demos, closed pilots with sensitive data, and
 public production, scored by dimension with a prioritized backlog — is in
-[assessment.md](assessment.md).
+[docs/assessment.md](docs/assessment.md).
 
 ## Making it yours
 
