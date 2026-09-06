@@ -3,6 +3,10 @@
   "version": "1.0.0",
   "license": "MIT",
   "private": true,
+  "engines": {
+    "node": ">=22.0.0",
+    "npm": ">=10.0.0"
+  },
   "type": "module",
   "scripts": {
     "cdk": "cdk",
