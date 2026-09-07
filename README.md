@@ -157,20 +157,37 @@ validation and a fixed caller id: it exercises the streaming path, not the autho
 | `npm run lint` / `typecheck` / `test` | ESLint · `tsc --noEmit` · vitest, across every package |
 | `npm run verify` | All three — what to run before opening a PR |
 | `npm run audit` | `npm audit --audit-level=high` in every package |
+| `npm run build` | Build every deployable artifact — agent bundle, BFF bundles, frontend `dist` |
 | `npm run synth` | Build artifacts and synthesize the CDK app |
 | `npm run deploy` | Deploy all infrastructure |
 | `npm run deploy:no-approval` | The same with no confirmation prompt — sandbox or pipeline only |
 | `npm run destroy` | Destroy all stacks |
 | `npm run docker:setup-arm64` | Enable local ARM64 emulation for the agent image build |
 
-`verify` and `audit` are what CI's `verify` job runs on every push and pull request
-(`.github/workflows/ci.yml`), so a green local run and a green CI job agree by construction. Two more
-jobs run there and nowhere else, because neither is useful on a laptop: **`secrets`** scans the full
-git history with TruffleHog — a credential committed once is leaked even after it is deleted — and
-**`sast`** runs CodeQL's `security-extended` queries, which reason across files in a way no lint rule
-can. Nothing in any of the three needs AWS credentials.
-Dependency updates arrive as pull requests from Dependabot (`.github/dependabot.yml`) — the audit
-gate reports what is already vulnerable, and something has to move the versions forward.
+### The CI gate
+
+`.github/workflows/ci.yml` runs five jobs, named so a red check says which concern broke. **It needs no
+AWS credentials, no repository secrets and no paid GitHub feature** — clone the template, open a pull
+request, and the gate works.
+
+| Job | Runs | Also runnable locally |
+|---|---|---|
+| `verify` | `npm run verify` then `npm run build` | Yes — identical |
+| `audit` | `npm run audit` | Yes — identical. Needs no `node_modules` |
+| `synth` | `npm run synth` — the only check that executes the real `app.ts` | Yes — identical |
+| `secrets` | TruffleHog, pinned by action SHA *and* scanner version | Yes, with Docker |
+| `sast` | Semgrep CE, `p/default`, pinned by image digest | Yes, with Docker |
+
+Two details worth knowing. **`secrets` and `sast` report through their exit codes rather than uploading
+to the Security tab**, because a code-scanning upload needs GitHub Code Security — paid on a private
+repository — and a template must not ship a gate that only works for whoever owns the original.
+And **`secrets` scans a pull request's diff, not its whole history**: the full-history pass runs on the
+weekly schedule, where it is worth the time. That schedule is also what re-runs `audit` against
+advisories published since the last commit.
+
+Dependency updates arrive as pull requests from Dependabot (`.github/dependabot.yml`), which waits
+seven days before proposing a new version — long enough that a compromised publish is usually yanked
+first. The audit gate reports what is already vulnerable; something has to move the versions forward.
 
 Not yet covered: an IaC policy scan. `cdk-nag`'s `AwsSolutionsChecks` currently reports 51 errors
 across this app, most of them the wildcard IAM statements AWS gives no alternative for — each needs an

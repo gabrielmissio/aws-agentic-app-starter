@@ -17,6 +17,7 @@
     "audit": "npm audit --audit-level=high && npm --prefix ./agent audit --audit-level=high && npm --prefix ./chatbot-bff audit --audit-level=high && npm --prefix ./chatbot-frontend audit --audit-level=high && npm --prefix ./infra audit --audit-level=high",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
+    "build": "npm --prefix ./agent run build && npm --prefix ./chatbot-bff run build && npm --prefix ./chatbot-frontend run build",
     "synth": "npm --prefix ./infra run synth",
     "deploy": "npm --prefix ./infra run deploy",
     "deploy:no-approval": "npm --prefix ./infra run deploy:no-approval",

@@ -1,122 +1,168 @@
 name: CI
 
-# The pull-request gate. Three concerns, deliberately in three jobs so a failure names which one:
-# `verify` is what a contributor already ran locally (see the root README's "Root scripts" table),
-# `secrets` and `sast` are the two checks that cannot be run usefully on a laptop.
-#
-# Nothing here needs AWS credentials, Docker or a browser: the infra suite synthesizes all four
-# stacks, and CDK stages a container asset's build context at synth rather than building it, so no
-# image is produced.
-#
-# A `cdk deploy` is a separate, credentialed concern and not a PR gate. A `cdk synth` job is not — it
-# needs neither credentials nor Docker, and adding one is the open gap the root README names under
-# "What this template leaves open".
+# The whole gate runs on a clone with no configuration: no AWS credentials, no repository secrets, no
+# paid feature, no Docker image of ours to build. Every check reports through its own exit code rather
+# than uploading to GitHub's Security tab — which is deliberate, because code scanning uploads require
+# GitHub Code Security on a private repository, and a template must not ship a gate that only works
+# for whoever owns the original.
+
 on:
   push:
     branches: [main]
   pull_request:
+  # What makes two of these checks meaningful in a way a pull request cannot: `audit` sees advisories
+  # published since the last commit, and `secrets` scans the whole history instead of a diff.
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
 
-# Read-only by default, for every job. Without this the `GITHUB_TOKEN` carries whatever the
-# repository's default is — historically write on everything — and a compromised dependency running
-# during `npm ci` inherits it. A job that needs more asks for it, and the ask is reviewable.
+# Nothing here writes. No job raises this.
 permissions:
   contents: read
 
+# A newer push to the same ref supersedes an in-flight run rather than racing it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  # Exactly what `npm run verify` runs locally, plus the build, so a green local run and a green job
+  # agree by construction.
   verify:
     runs-on: ubuntu-latest
-    # A hung install or a test that waits forever costs a runner for six hours by default.
     timeout-minutes: 20
     steps:
-      # Actions are pinned to a commit, not a tag. A tag is a mutable pointer the action's owner can
-      # move at any time, so `@v4` means "whatever that repository decides it means today" — which
-      # is a write-access-to-your-CI relationship with every action author. The comment records
-      # which release the SHA was, so the pin is still readable by a human.
+      # Actions are pinned to a commit, not a tag: a tag is a mutable pointer its owner can move, so
+      # `@v4` is a standing write relationship with every action author. The comment records which
+      # release the SHA was, so the pin stays readable.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # The checkout action otherwise leaves the token in `.git/config` for the rest of the job,
-          # where every later step — including anything `npm ci` executes — can read it.
+          # Otherwise the token stays in `.git/config` where any later step can read it.
           persist-credentials: false
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '22'
           cache: npm
-          cache-dependency-path: |
-            package-lock.json
-            agent/package-lock.json
-            chatbot-bff/package-lock.json
-            chatbot-frontend/package-lock.json
-            infra/package-lock.json
+          # A glob, not a list: npm workspaces are not used here, so a new package means a new lockfile,
+          # and an enumerated list would silently stop covering it.
+          cache-dependency-path: '**/package-lock.json'
 
-      - name: Install dependencies (root + every subpackage)
+      - name: Install (root + every subpackage)
         run: npm run bootstrap
 
       - name: Lint, typecheck, test
         run: npm run verify
 
-      # Gates on `high`, not `critical`. A remotely exploitable flaw in a dependency that handles
-      # request bodies is routinely scored high, and a gate that only stops `critical` is a gate that
-      # lets those through while reporting green.
-      - name: Audit
-        run: npm run audit
+      - name: Build every deployable artifact
+        run: npm run build
 
-  # ── Secret scanning ──────────────────────────────────────────────────────────
+  # Gates on `high`, not `critical`: a remotely exploitable flaw in a dependency that parses request
+  # bodies is routinely scored high, and a gate that stops only `critical` reports green while letting
+  # those through. Needs no `node_modules` — `npm audit` resolves from the lockfiles alone.
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+
+      - run: npm run audit
+
+  # Infrastructure validation. The suite already asserts properties of the synthesized template, but it
+  # constructs stacks directly; this is the only check that runs the real entrypoint, so a broken
+  # `app.ts` — a bad context lookup, a cross-stack cycle — fails here and nowhere else.
+  #
+  # Credential-free: `CDK_DEFAULT_ACCOUNT` is unset, so the app synthesizes environment-agnostic
+  # templates. `DEPLOY_PROFILE` is likewise unset, which means `demo`, which the profile gate does not
+  # check — the gate's refusal path is covered by `infra/src/__tests__/app.test.ts` instead.
+  synth:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: '**/package-lock.json'
+
+      - name: Install (root + every subpackage)
+        run: npm run bootstrap
+
+      # `presynth` builds the BFF and frontend assets the templates reference. No Docker: CDK stages a
+      # container asset's build context at synth and builds it at publish time.
+      - name: Synthesize all four stacks
+        run: npm run synth
+
   # `npm audit` says whether a dependency is vulnerable. It says nothing about whether this repository
-  # is carrying a credential, and a secret committed once is leaked even after it is deleted — which is
-  # why this scans history rather than the working tree.
+  # is carrying a credential.
   #
   # TruffleHog rather than gitleaks-action, for a reason specific to a template: gitleaks-action
-  # requires a paid `GITLEAKS_LICENSE` for any repository owned by an *organization*, so most forks
-  # that matter would inherit a gate that fails until someone buys a key. This one has no such
-  # condition.
+  # requires a paid licence for any organization-owned repository, so most forks would inherit a gate
+  # that fails until someone buys a key.
   secrets:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # The whole history, because that is the point — a rotated-but-committed key is still in it.
+          # Both commits of a pull request have to be present for the diff scan below, and the whole
+          # history for the scheduled one.
           fetch-depth: 0
           persist-credentials: false
 
       - uses: trufflesecurity/trufflehog@363923b901c911a9164f50b6c423f47c15372b1c # v3.97.4
         with:
-          path: ./
-          # An empty base is what makes it scan every commit rather than a diff. Left as a diff scan,
-          # the job passes on a secret that arrived before the pull request.
-          base: ''
-          head: HEAD
-          # `verified,unknown` rather than `--only-verified`. Verification proves a credential is live,
-          # so verified-only reports nothing for a key that has already been rotated — and the point of
-          # scanning history is precisely to find those. The cost is false positives; a fork drowning in
-          # them should narrow this rather than delete the job.
+          # The action defaults to `latest`, so pinning the action by SHA does not pin the scanner it
+          # runs. This is what does.
+          version: 3.97.4
+          # `verified` means a detector confirmed the credential is live; `unknown` means verification
+          # could not run — no verifier for that type, or the check itself failed. Both are worth a
+          # human. What this excludes is `unverified`: a candidate a detector actively checked and
+          # found dead, which is the bulk of the noise.
           extra_args: --results=verified,unknown
+          #
+          # `base`/`head` are deliberately unset, which is what lets the action pick the range from the
+          # event: a pull request scans its own diff, a push scans what it pushed, and the scheduled run
+          # scans everything. Pinning them to a full-history scan made every pull request re-read the
+          # whole history to find nothing new.
+          #
+          # The scheduled run is not redundant with the diff scans: a secret can arrive on a branch that
+          # is never opened as a pull request, and a detector added upstream only finds an old secret if
+          # something eventually re-reads the old commits.
 
-  # ── Static analysis ──────────────────────────────────────────────────────────
-  # ESLint enforces style and a set of correctness rules; it is not a security analyser. CodeQL is,
-  # and it is the one check here that reasons across files — a tainted value reaching a sink several
-  # calls away is exactly what no lint rule in `eslint.config.mjs` can see.
+  # ESLint enforces style and correctness; it is not a security analyser, and no rule in
+  # `eslint.config.mjs` can follow a tainted value across files. Semgrep can.
   #
-  # `security-extended` rather than the default suite: the default trades recall for precision, and on
-  # a template the cost of a missed injection path is inherited by every fork.
+  # Semgrep CE rather than CodeQL: CodeQL's upload needs GitHub Code Security, which is paid on private
+  # repositories, so the check every fork inherits would go red for reasons the fork cannot fix. This
+  # needs no account and no token; `p/default` is fetched anonymously from the public registry.
+  #
+  # Two findings are suppressed at the line, each with the evidence for it — see `agent/src/caller.ts`
+  # and `chatbot-frontend/src/__tests__/qrcode.test.ts`. Suppress rather than lower the ruleset, so the
+  # reason lives next to the code and is reviewable.
   sast:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    permissions:
-      contents: read
-      # The only elevated grant in this workflow, and it is what uploads the results to the
-      # repository's Security tab. Scoped to this job rather than raised at the top of the file.
-      security-events: write
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      # No build step and no dependency install: CodeQL analyses JavaScript and TypeScript from source.
-      - uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4
-        with:
-          languages: javascript-typescript
-          queries: security-extended
-
-      - uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4
+      # Run through the image rather than `pip install semgrep`, pinned by digest so the ruleset engine
+      # is the one this was validated against. Installs nothing else: Semgrep reads source, so this job
+      # has no `node_modules` and therefore nothing for it to waste time scanning.
+      - name: Semgrep
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src \
+            semgrep/semgrep@sha256:51c9f53a4fce0d55e9abd08d7b96968654248a4b1122e77f20e0a49c0072446c \
+            semgrep scan --config p/default --error --metrics=off

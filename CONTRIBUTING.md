@@ -44,10 +44,16 @@ Both must pass before you open a pull request. CI's `verify` job runs exactly th
 (`.github/workflows/ci.yml`), so a green local run is a green CI job — neither needs AWS credentials,
 Docker or a browser.
 
-CI adds two jobs you cannot usefully reproduce locally: `secrets` scans the whole git history with
-TruffleHog, and `sast` runs CodeQL. Both can fail a pull request. If `secrets` flags something that is
-not a secret, narrow its `extra_args` in the workflow and say why in the pull request — do not delete
-the job.
+CI runs three more jobs — `synth` (`npm run synth`, which you can also run), plus `secrets`
+(TruffleHog) and `sast` (Semgrep CE), which need Docker rather than credentials. All can fail a pull
+request. If `secrets` or `sast` flags something that is not a real problem, suppress it at the line with
+the evidence beside it — `// nosemgrep: <full-rule-id>` — rather than widening an exclude or deleting
+the job. There are two such suppressions today, in `agent/src/caller.ts` and
+`chatbot-frontend/src/__tests__/qrcode.test.ts`.
+
+The whole gate is deliberately free of external configuration: no AWS credentials, no repository
+secrets, no GitHub Code Security. If a change to CI would introduce one, say so in the pull request —
+it is a cost every fork inherits.
 
 ## Tests
 
