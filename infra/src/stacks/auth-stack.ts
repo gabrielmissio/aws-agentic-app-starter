@@ -168,6 +168,10 @@ export class AuthStack extends cdk.Stack {
       // The pool holds every account: `cdk destroy`, or a replacement-forcing property change,
       // takes them all with it.
       removalPolicy: retainData ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+      // And `RETAIN` governs CloudFormation only. This is the API-level guard: it makes
+      // `DeleteUserPool` fail outright, which is the call `RETAIN` has nothing to say about. Tied to
+      // the same decision, so a sandbox that opted out of retention can still be torn down.
+      deletionProtection: retainData,
     })
 
     // ── HTML invite & verification emails ────────────────────────────────

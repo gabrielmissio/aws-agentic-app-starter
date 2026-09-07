@@ -190,6 +190,13 @@ export class BffStack extends cdk.Stack {
       // Unlike the rate-limit counters, these rows are the user's own data — they name what someone
       // talked about — so they follow the same retention decision as the user pool.
       removalPolicy: retainData ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+      // `RETAIN` above only governs CloudFormation: it survives a `cdk destroy`, and nothing else.
+      // These two cover what it does not — a bad write, a bulk delete, or a `DeleteTable` call made
+      // outside the stack. Continuous backups are billed on the size of what they protect, which for
+      // an index of titles and timestamps is small; the rate-limit table above deliberately gets
+      // neither, because losing disposable counters costs a reset.
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      deletionProtection: retainData,
       encryption: dynamodb.TableEncryption.CUSTOMER_MANAGED,
       encryptionKey,
     })

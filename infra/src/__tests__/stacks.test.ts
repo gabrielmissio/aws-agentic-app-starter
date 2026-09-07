@@ -247,6 +247,25 @@ describe('AuthStack — retainData', () => {
 
     expect(pool.DeletionPolicy).toBe('Delete')
   })
+
+  /**
+   * `RETAIN` above governs CloudFormation and nothing else: it survives a `cdk destroy` and says
+   * nothing about a `DeleteUserPool` call made outside the stack. Losing the pool is losing every
+   * account, and that is not recoverable — so the API-level guard is asserted separately from the
+   * CloudFormation one, and follows the same decision so a sandbox can still be torn down.
+   */
+  it('guards the pool against deletion outside CloudFormation', () => {
+    expect(
+      Object.values(synthAuth().template.findResources('AWS::Cognito::UserPool'))[0].Properties
+        .DeletionProtection,
+    ).toBe('ACTIVE')
+
+    expect(
+      Object.values(
+        synthAuth({ retainData: false }).template.findResources('AWS::Cognito::UserPool'),
+      )[0].Properties.DeletionProtection,
+    ).toBe('INACTIVE')
+  })
 })
 
 function synthBff(
@@ -256,6 +275,7 @@ function synthBff(
     allowedOrigin?: string
     wafEnabled?: boolean
     tracingEnabled?: boolean
+    retainData?: boolean
   } = {},
 ) {
   const app = new cdk.App()
@@ -505,6 +525,43 @@ describe('BffStack — the evidence layer a pilot is asked for', () => {
     template.hasResourceProperties('AWS::Lambda::Function', {
       Handler: 'dist/handler.handler',
       Environment: { Variables: Match.objectLike({ CONVERSATION_RETENTION_DAYS: '30' }) },
+    })
+  })
+
+  /**
+   * Recoverability, which is a different question from retention and was answered only by `RETAIN`.
+   * That covers a `cdk destroy`; it does not cover a bad write, a bulk delete, or a `DeleteTable`
+   * call — and the index rows name what someone talked about, so "restore last Tuesday" has to have
+   * an answer. The rate-limit table is asserted to have *neither*, because continuous backups on
+   * disposable counters are spend with nothing to recover.
+   */
+  it('keeps the conversation index recoverable, and does not pay to protect counters', () => {
+    const { template } = synthBff()
+
+    template.hasResourceProperties('AWS::DynamoDB::Table', {
+      TableName: 'test-bff-conversations',
+      PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true },
+      DeletionProtectionEnabled: true,
+    })
+
+    const counters = Object.values(
+      template.findResources('AWS::DynamoDB::Table', {
+        Properties: { TableName: 'test-bff-rate-limit' },
+      }),
+    )[0]
+    expect(counters.Properties.PointInTimeRecoverySpecification).toBeUndefined()
+    expect(counters.Properties.DeletionProtectionEnabled).toBeUndefined()
+    expect(counters.DeletionPolicy).toBe('Delete')
+  })
+
+  // Tied to the same decision as the removal policy, so a sandbox that opted out of retention is
+  // still destroyable — otherwise `cdk destroy` fails on the table and leaves the stack wedged.
+  it('lifts deletion protection when the deployment opted out of retention', () => {
+    const { template } = synthBff({ retainData: false })
+
+    template.hasResourceProperties('AWS::DynamoDB::Table', {
+      TableName: 'test-bff-conversations',
+      DeletionProtectionEnabled: false,
     })
   })
 })

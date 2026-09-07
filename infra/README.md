@@ -72,6 +72,32 @@ The grants split three ways, and the split is the point:
 A browser-reachable function that could write history could also forge it, and a forged transcript is
 worse than none because it is believed.
 
+### What is recoverable, and what is not
+
+`RETAIN_DATA` is about CloudFormation: it decides whether `cdk destroy` takes the stateful resources
+with it. It is not a backup, and the two questions have different answers here.
+
+| Holds | Survives `cdk destroy` | Survives a bad write or an out-of-band delete |
+|---|---|---|
+| Cognito user pool | `RETAIN_DATA` | **Yes** — `DeletionProtection` makes `DeleteUserPool` fail. No point-in-time restore of user records, though |
+| Conversation index (DynamoDB) | `RETAIN_DATA` | **Yes** — continuous backups (PITR) are on, and `DeletionProtectionEnabled` follows `RETAIN_DATA`. Restore with `aws dynamodb restore-table-to-point-in-time` |
+| Rate-limit counters (DynamoDB) | No, deliberately | No, deliberately — losing them resets every quota, and paying to protect disposable counters is spend with nothing to recover |
+| **AgentCore Memory** (the conversations themselves) | `RETAIN_DATA` | **No.** See below |
+| Frontend bucket | `RETAIN_DATA` | Not needed — it holds a rebuildable build |
+| Log groups | No, deliberately | No — see the note on the telemetry group in `agent-stack.ts` |
+
+**The gap worth knowing before a pilot: AgentCore Memory has no backup in this template.** The service
+provides no point-in-time restore, and nothing here exports events on a schedule. So a deletion — by
+the `/conversations` route, by `eventExpiryDuration` elapsing, or by a mistake — is final, and the
+conversation index can be restored while the transcripts it points at cannot, which surfaces as
+sidebar rows that open empty.
+
+That is the correct default for a template: an export job is a data-residency and retention decision,
+and writing conversation content into a second store contradicts the promise
+`CONVERSATION_RETENTION_DAYS` makes. If your obligations require recoverable transcripts, add a
+scheduled reader over `ListEvents` writing to a bucket with its own lifecycle — put it on the
+conversations function's role, which already holds the read, and never on the chat function's.
+
 ### Where a data layer goes
 
 There is none: the template stores no domain data, and the one table it creates — the rate-limit
