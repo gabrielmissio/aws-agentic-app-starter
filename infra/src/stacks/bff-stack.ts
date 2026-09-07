@@ -595,7 +595,9 @@ function attachWebAcl(scope: Construct, projectName: string, api: apigateway.Res
 
   const acl = new wafv2.CfnWebACL(scope, 'ApiWebAcl', {
     name: `${projectName}-api-acl`,
-    description: `Edge protection for ${projectName}'s API stage.`,
+    // No apostrophe: CloudFormation validates this against a pattern that permits only
+    // alphanumerics and `+=:#@/-,.` plus whitespace, so a possessive fails template validation.
+    description: `Edge protection for the ${projectName} API stage.`,
     // REGIONAL, not CLOUDFRONT: the ACL is associated with an API Gateway stage. A CloudFront-scoped
     // ACL must live in us-east-1 and would protect the SPA distribution, which is a different door.
     scope: 'REGIONAL',

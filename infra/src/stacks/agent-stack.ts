@@ -734,8 +734,10 @@ export function createObservability(
       deliverySourceName: source.name,
       deliveryDestinationArn: destination.attrArn,
     })
-    delivery.addDependency(source)
-    delivery.addDependency(destination)
+    // A delivery names its source and destination by name and ARN, which CloudFormation cannot see
+    // as a dependency — without these it may try to create the delivery first and fail.
+    delivery.addResourceDependency(source)
+    delivery.addResourceDependency(destination)
   }
 
   return { logGroup, metricNamespace: `${projectName}/Agent` }
