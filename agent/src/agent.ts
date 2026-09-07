@@ -44,7 +44,7 @@ const guardrailConfig = resolveGuardrail()
 
 const bedrockModel = new strands.BedrockModel({
   region: process.env.AWS_REGION || 'us-east-1',
-  modelId: process.env.BEDROCK_MODEL_ID || 'global.anthropic.claude-sonnet-4-6',
+  modelId: process.env.BEDROCK_MODEL_ID || 'us.anthropic.claude-sonnet-5',
   ...(guardrailConfig ? { guardrailConfig } : {}),
 })
 
