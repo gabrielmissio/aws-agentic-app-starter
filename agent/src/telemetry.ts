@@ -27,7 +27,7 @@
 import { context, propagation, type Context } from '@opentelemetry/api'
 import { W3CBaggagePropagator, W3CTraceContextPropagator, CompositePropagator } from '@opentelemetry/core'
 import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks'
-import { resourceFromAttributes } from '@opentelemetry/resources'
+import { detectResources, envDetector, resourceFromAttributes } from '@opentelemetry/resources'
 import { MeterProvider, PeriodicExportingMetricReader } from '@opentelemetry/sdk-metrics'
 import { BasicTracerProvider, BatchSpanProcessor } from '@opentelemetry/sdk-trace-base'
 import { setupMeter, setupTracer } from '@strands-agents/sdk/telemetry'
@@ -41,6 +41,26 @@ export type FlushTelemetry = () => Promise<void>
 export interface Telemetry {
   enabled: boolean
   flush: FlushTelemetry
+}
+
+/**
+ * The resource every span and metric carries.
+ *
+ * Built through `envDetector`, not from the literal alone, and that is a correction. The deployed
+ * runtime sets `OTEL_RESOURCE_ATTRIBUTES`; `resourceFromAttributes` does not read it. Spans went out
+ * carrying `service.name` and nothing else, so `aws.log.group.names` — the attribute that offers a
+ * span's surrounding log lines in the console — never arrived, while the stack's comment beside that
+ * variable claimed it did. The detector is the SDK's own parser for the variable, which keeps the
+ * format the spec's rather than a second implementation of it.
+ *
+ * Merged second, so the environment wins: the literal here is the fallback for a local run, not an
+ * override of the deployment. Note the detector reads `process.env` rather than `env` — that
+ * variable is the platform's, and the SDK is the thing that owns its parsing.
+ */
+export function telemetryResource(env: NodeJS.ProcessEnv = process.env) {
+  return resourceFromAttributes({
+    'service.name': env.OTEL_SERVICE_NAME?.trim() || 'agent',
+  }).merge(detectResources({ detectors: [envDetector] }))
 }
 
 /**
@@ -63,9 +83,7 @@ export function startTelemetry(env: NodeJS.ProcessEnv = process.env): Telemetry 
 
   if (env.AGENT_OBSERVABILITY_ENABLED?.trim().toLowerCase() !== 'true') return noop
 
-  const resource = resourceFromAttributes({
-    'service.name': env.OTEL_SERVICE_NAME?.trim() || 'agent',
-  })
+  const resource = telemetryResource(env)
 
   // Redaction wraps signing, so there is no ordering to get wrong: the only object the batch
   // processor can reach the endpoint through is the one that sanitizes first.

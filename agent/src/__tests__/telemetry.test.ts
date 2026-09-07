@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest'
-import { parseBaggage, startTelemetry } from '../telemetry'
+import { afterEach, describe, expect, it } from 'vitest'
+import { parseBaggage, startTelemetry, telemetryResource } from '../telemetry'
 import { parseOtlpHeaders } from '../otlp-sigv4'
 
 /**
@@ -82,5 +82,46 @@ describe('parseOtlpHeaders', () => {
     expect(parseOtlpHeaders(undefined)).toEqual({})
     expect(parseOtlpHeaders('')).toEqual({})
     expect(parseOtlpHeaders('nonsense')).toEqual({})
+  })
+})
+
+/**
+ * The resource, asserted because it silently lost an attribute.
+ *
+ * `agent-stack.ts` sets `OTEL_RESOURCE_ATTRIBUTES` and comments that `aws.log.group.names` "is what
+ * correlates a trace with the log lines written beside it". It was not: the resource was built with
+ * `resourceFromAttributes` alone, which does not read that variable, so every exported span carried
+ * `service.name` and nothing more. Nothing failed and nothing logged — the console simply offered no
+ * logs beside a span. These tests pin the variable actually reaching the resource.
+ */
+describe('telemetryResource', () => {
+  const saved = process.env.OTEL_RESOURCE_ATTRIBUTES
+
+  afterEach(() => {
+    if (saved === undefined) delete process.env.OTEL_RESOURCE_ATTRIBUTES
+    else process.env.OTEL_RESOURCE_ATTRIBUTES = saved
+  })
+
+  it('carries the attributes the deployment sets', () => {
+    process.env.OTEL_RESOURCE_ATTRIBUTES =
+      'aws.log.group.names=/aws/bedrock-agentcore/runtimes/agent,cloud.resource_id=arn:aws:x'
+
+    expect(telemetryResource({ OTEL_SERVICE_NAME: 'agent' }).attributes).toMatchObject({
+      'aws.log.group.names': '/aws/bedrock-agentcore/runtimes/agent',
+      'cloud.resource_id': 'arn:aws:x',
+    })
+  })
+
+  /** The environment is the deployment's word on this; the literal is only a local-run fallback. */
+  it('lets the environment override the fallback service name', () => {
+    process.env.OTEL_RESOURCE_ATTRIBUTES = 'service.name=from-env'
+
+    expect(telemetryResource({ OTEL_SERVICE_NAME: 'from-code' }).attributes['service.name']).toBe('from-env')
+  })
+
+  it('falls back to a service name when nothing is set', () => {
+    delete process.env.OTEL_RESOURCE_ATTRIBUTES
+
+    expect(telemetryResource({}).attributes['service.name']).toBe('agent')
   })
 })
