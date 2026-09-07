@@ -675,7 +675,18 @@ export function createObservability(
     retention: nearestRetention(retentionDays),
     encryptionKey,
     dataProtectionPolicy,
-    removalPolicy: cdk.RemovalPolicy.RETAIN,
+    // `DESTROY`, like every other log group in this template, and deliberately not `RETAIN`.
+    //
+    // `RETAIN` also applies to the rollback of the update that *created* the group: a deploy that
+    // gets this far and then fails on anything later leaves the group orphaned in the account, no
+    // longer tracked by the stack — and the next attempt fails with "already exists" before it does
+    // anything else. For a template, that is a trap set for every fork's first deploy of this
+    // feature, and clearing it needs a manual delete nobody expects to be asked for.
+    //
+    // Nothing is protected by retaining it. What is retained under `retainData` is the conversation
+    // itself, in AgentCore Memory; this group holds telemetry *describing* turns, already bounded by
+    // the retention above and already masked by the policy below it.
+    removalPolicy: cdk.RemovalPolicy.DESTROY,
   })
 
   // X-Ray writes the spans into the log group on the agent's behalf, so the *service* needs the

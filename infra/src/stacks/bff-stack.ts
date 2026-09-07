@@ -49,6 +49,21 @@ export interface BffStackProps extends cdk.StackProps {
   retainData?: boolean
 }
 
+/**
+ * The AWS account that publishes the ADOT Lambda layers. Fixed by AWS, identical in every Region.
+ */
+const ADOT_LAYER_ACCOUNT = '901920570463'
+
+/**
+ * The ADOT Node.js layer version, as `<semver-with-dashes>:<layer-version>`.
+ *
+ * Pinned deliberately: a template that floats to "latest" changes what a fork deploys without the
+ * fork changing anything. It will go stale — check
+ * https://aws-otel.github.io/docs/getting-started/lambda/lambda-js for the current value and bump it
+ * here, which is the only place it appears.
+ */
+const ADOT_LAYER_VERSION = '1-30-2:6'
+
 export class BffStack extends cdk.Stack {
   /** The /chat endpoint URL — consumed by FrontendStack for env-var injection */
   public readonly apiUrl: string
@@ -83,6 +98,58 @@ export class BffStack extends cdk.Stack {
      * question actually gets asked.
      */
     const tracing = tracingEnabled ? lambda.Tracing.ACTIVE : lambda.Tracing.DISABLED
+
+    /**
+     * Graviton, for all three functions.
+     *
+     * ~20% cheaper per GB-second than x86 at equal or better performance, and AWS's recommended
+     * default for new workloads. Safe here because the deployed artifact is pure JavaScript: tsup
+     * bundles every dependency in and the CDK asset excludes `node_modules`, so nothing
+     * architecture-specific ships. A function that later needs a native module has to revisit this.
+     */
+    const architecture = lambda.Architecture.ARM_64
+
+    // The layer has to match the function's architecture, and a mismatch fails at deploy with an
+    // error that names neither. Derived from the constant above rather than written twice.
+    const adotArchitecture = architecture === lambda.Architecture.ARM_64 ? 'arm64' : 'amd64'
+
+    /**
+     * OpenTelemetry auto-instrumentation for the three functions, from the AWS-managed ADOT layer.
+     *
+     * **Why a layer and not the X-Ray SDK.** The X-Ray SDKs entered maintenance mode in February
+     * 2026 — security patches only — and AWS names OpenTelemetry as the instrumentation path. More
+     * than that: the agent container is already pure OTel, so reaching for the X-Ray SDK here would
+     * make one template bilingual in tracing, with two context models a fork would inherit and have
+     * to unpick. See the invariant in AGENTS.md.
+     *
+     * What it buys, concretely: `tracing: ACTIVE` alone traces the *invocation*, so a trace map
+     * shows API Gateway and Lambda and then stops — DynamoDB and Cognito are invisible and the
+     * AgentCore call renders as `UnknownRemoteService`, because nothing writes the attributes that
+     * name a downstream. The layer instruments the AWS SDK and supplies them.
+     *
+     * Gated on `tracingEnabled` alongside the active-tracing setting it belongs to: a layer
+     * exporting spans while X-Ray is off would bill for telemetry the deployment declared it did
+     * not want.
+     */
+    const adotLayer = tracingEnabled
+      ? lambda.LayerVersion.fromLayerVersionArn(
+          this,
+          'AdotLayer',
+          `arn:${this.partition}:lambda:${this.region}:${ADOT_LAYER_ACCOUNT}:layer:aws-otel-nodejs-${adotArchitecture}-ver-${ADOT_LAYER_VERSION}`,
+        )
+      : undefined
+
+    /** Applied to every function, so a new one cannot be born untraced by omission. */
+    const otelEnvironment: Record<string, string> = adotLayer
+      ? {
+          // Node's wrapper. `/opt/otel-instrument` is the *Python* one and fails silently here —
+          // the function runs, uninstrumented, and the trace map looks exactly as it did before.
+          AWS_LAMBDA_EXEC_WRAPPER: '/opt/otel-handler',
+          // Pinned rather than left to the layer's default, so an upstream change to that default
+          // cannot quietly alter what this template traces.
+          OTEL_NODE_ENABLED_INSTRUMENTATIONS: 'aws-sdk,aws-lambda,http',
+        }
+      : {}
 
     // ── Per-caller rate limit table ─────────────────────────────────────
     // One item per (caller, window); see chatbot-bff/src/rate-limit.ts. Disposable counters, not
@@ -130,8 +197,9 @@ export class BffStack extends cdk.Stack {
       runtime: lambda.Runtime.NODEJS_22_X,
       timeout: cdk.Duration.seconds(60),
       memorySize: 512,
-      architecture: lambda.Architecture.X86_64,
+      architecture,
       tracing,
+      ...(adotLayer ? { layers: [adotLayer] } : {}),
       // JSON rather than the default text. `logEvent` (chatbot-bff/src/correlation.ts) already emits
       // one JSON object per line, but Lambda's own START/END/REPORT lines and any stray `console`
       // call stayed unstructured — so a Logs Insights query filtering on a correlation id silently
@@ -140,6 +208,10 @@ export class BffStack extends cdk.Stack {
       applicationLogLevelV2: lambda.ApplicationLogLevel.INFO,
       systemLogLevelV2: lambda.SystemLogLevel.WARN,
       environment: {
+        ...otelEnvironment,
+        // Names this function's node in the trace map. Without it the map falls back to a generic
+        // label and two of the three functions become indistinguishable.
+        OTEL_SERVICE_NAME: `${projectName}-bff`,
         ALLOWED_ORIGIN: allowedOrigin,
         AGENT_RUNTIME_ARN: agentRuntimeArn,
         COGNITO_USER_POOL_ID: userPool.userPoolId,
@@ -294,8 +366,9 @@ export class BffStack extends cdk.Stack {
       // billing after the gateway has returned 504. The chat function streams, so it is exempt.
       timeout: cdk.Duration.seconds(29),
       memorySize: 256,
-      architecture: lambda.Architecture.X86_64,
+      architecture,
       tracing,
+      ...(adotLayer ? { layers: [adotLayer] } : {}),
       // JSON rather than the default text. `logEvent` (chatbot-bff/src/correlation.ts) already emits
       // one JSON object per line, but Lambda's own START/END/REPORT lines and any stray `console`
       // call stayed unstructured — so a Logs Insights query filtering on a correlation id silently
@@ -304,6 +377,8 @@ export class BffStack extends cdk.Stack {
       applicationLogLevelV2: lambda.ApplicationLogLevel.INFO,
       systemLogLevelV2: lambda.SystemLogLevel.WARN,
       environment: {
+        ...otelEnvironment,
+        OTEL_SERVICE_NAME: `${projectName}-bff-admin`,
         ALLOWED_ORIGIN: allowedOrigin,
         COGNITO_USER_POOL_ID: userPool.userPoolId,
         ADMIN_GROUP_NAME,
@@ -357,8 +432,9 @@ export class BffStack extends cdk.Stack {
       runtime: lambda.Runtime.NODEJS_22_X,
       timeout: cdk.Duration.seconds(29),
       memorySize: 256,
-      architecture: lambda.Architecture.X86_64,
+      architecture,
       tracing,
+      ...(adotLayer ? { layers: [adotLayer] } : {}),
       // JSON rather than the default text. `logEvent` (chatbot-bff/src/correlation.ts) already emits
       // one JSON object per line, but Lambda's own START/END/REPORT lines and any stray `console`
       // call stayed unstructured — so a Logs Insights query filtering on a correlation id silently
@@ -367,6 +443,8 @@ export class BffStack extends cdk.Stack {
       applicationLogLevelV2: lambda.ApplicationLogLevel.INFO,
       systemLogLevelV2: lambda.SystemLogLevel.WARN,
       environment: {
+        ...otelEnvironment,
+        OTEL_SERVICE_NAME: `${projectName}-bff-conversations`,
         ALLOWED_ORIGIN: allowedOrigin,
         AGENTCORE_MEMORY_ID: memoryId,
         CONVERSATION_TABLE_NAME: conversationTable.tableName,

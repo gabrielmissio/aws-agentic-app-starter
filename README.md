@@ -20,7 +20,7 @@ is the scaffolding, not someone else's product.
 | **Conversations** | Durable on AgentCore Memory: survives a restart, isolated per user by `actorId`, encrypted with the deployment's own KMS key, expired on a retention you declare |
 | **Auth** | Cognito — self sign-up or invite-only behind one variable, optional TOTP, localized emails, and admin invites from the browser |
 | **Safety** | An opt-in Bedrock guardrail: content filters, prompt-attack detection, PII anonymization. Required under `pilot` and `prod` |
-| **Evidence** | X-Ray on the API stage and every Lambda, GenAI-convention spans and token metrics from the agent in CloudWatch, a `traceparent` that makes all three one trace, and a correlation id minted in the browser that reaches the stored turn |
+| **Evidence** | OpenTelemetry end to end — the ADOT layer on every Lambda and X-Ray on the API stage, GenAI-convention spans and token metrics from the agent in CloudWatch, a `traceparent` that makes all three one trace, and a correlation id minted in the browser that reaches the stored turn |
 | **Infrastructure** | Four CDK stacks, and a **deployment-profile gate** that refuses to synthesize a pilot still carrying sandbox defaults |
 | **Controls** | Retention, alarms, an account budget, stage throttling, an optional WAF — each off by default, each documented with what it bills for |
 

@@ -901,6 +901,20 @@ describe('AgentStack — agent telemetry', () => {
   })
 
   /**
+   * `RETAIN` here is a trap, not a safeguard: it applies to the rollback of the update that created
+   * the group, so a deploy failing on any later resource orphans it and the next attempt dies with
+   * "already exists" before doing anything. It cost one real deploy to find. Nothing is protected by
+   * retaining it — the conversation itself lives in AgentCore Memory, which *is* retained.
+   */
+  it('lets the telemetry log group be destroyed with the stack', () => {
+    const { template } = synthObservability()
+
+    const groups = Object.values(template.findResources('AWS::Logs::LogGroup'))
+    expect(groups).toHaveLength(1)
+    expect((groups[0] as { DeletionPolicy?: string }).DeletionPolicy).toBe('Delete')
+  })
+
+  /**
    * A log group whose retention outlived the conversation would be a second copy of the turn under a
    * longer retention — quietly reopening the deletion promise the memory resource makes.
    */
@@ -1057,5 +1071,72 @@ describe('BffStack — operational visibility', () => {
         ?.Properties,
     )
     expect(body).not.toContain('GenAiAgentTokensInput')
+  })
+})
+
+describe('BffStack — one telemetry model', () => {
+  function synth(tracingEnabled: boolean) {
+    const app = new cdk.App()
+    const auth = new AuthStack(app, 'TestAuth', { projectName: 'test', env })
+    const stack = new BffStack(app, 'TestBff', {
+      projectName: 'test',
+      userPool: auth.userPool,
+      throttle: { rateLimit: 10, burstLimit: 20 },
+      tracingEnabled,
+      ...upstreamProps(auth),
+      env,
+    })
+    return Template.fromStack(stack)
+  }
+
+  /**
+   * The invariant. The X-Ray SDKs went to maintenance mode in February 2026 and the agent container
+   * is already pure OTel, so instrumenting the BFF the other way would make one template bilingual
+   * in tracing — two context models every fork inherits. Asserted by absence, because reaching for
+   * `aws-xray-sdk-core` is the reflex this exists to prevent.
+   */
+  it('instruments with OpenTelemetry and nothing else', () => {
+    const rendered = JSON.stringify(synth(true).toJSON())
+
+    expect(rendered).toContain('aws-otel-nodejs')
+    expect(rendered).not.toContain('aws-xray-sdk')
+  })
+
+  /**
+   * `/opt/otel-instrument` is the *Python* wrapper. Setting it here leaves the function running and
+   * uninstrumented, and the trace map looks exactly as it did before — a failure with no error.
+   */
+  it('uses the Node wrapper, not the Python one', () => {
+    const template = synth(true)
+
+    for (const fn of Object.values(template.findResources('AWS::Lambda::Function'))) {
+      const environment = (fn.Properties as { Environment?: { Variables?: Record<string, string> } })
+        .Environment?.Variables
+      expect(environment?.AWS_LAMBDA_EXEC_WRAPPER).toBe('/opt/otel-handler')
+      // Without a service name the map cannot tell two of the three functions apart.
+      expect(environment?.OTEL_SERVICE_NAME).toMatch(/^test-bff/)
+    }
+  })
+
+  /** A layer whose architecture differs from the function's fails at deploy naming neither. */
+  it('matches the layer architecture to the functions', () => {
+    const template = synth(true)
+
+    for (const fn of Object.values(template.findResources('AWS::Lambda::Function'))) {
+      const properties = fn.Properties as { Architectures?: string[]; Layers?: unknown[] }
+      expect(properties.Architectures).toEqual(['arm64'])
+      expect(JSON.stringify(properties.Layers)).toContain('aws-otel-nodejs-arm64')
+    }
+  })
+
+  /** Instrumentation is billed telemetry: a deployment that declined tracing must not pay for it. */
+  it('ships no layer when tracing is off', () => {
+    const template = synth(false)
+
+    for (const fn of Object.values(template.findResources('AWS::Lambda::Function'))) {
+      const properties = fn.Properties as { Layers?: unknown[]; Environment?: { Variables?: Record<string, string> } }
+      expect(properties.Layers ?? []).toHaveLength(0)
+      expect(properties.Environment?.Variables?.AWS_LAMBDA_EXEC_WRAPPER).toBeUndefined()
+    }
   })
 })
