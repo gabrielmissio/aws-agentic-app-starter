@@ -298,7 +298,7 @@ export class AgentStack extends cdk.Stack {
                 sid: 'WriteAgentTelemetry',
                 effect: iam.Effect.ALLOW,
                 actions: ['logs:CreateLogStream', 'logs:PutLogEvents', 'logs:DescribeLogStreams'],
-                resources: [observability.logGroup.logGroupArn, `${observability.logGroup.logGroupArn}:*`],
+                resources: [observability.logGroup.logGroupArn],
               }),
               // AgentCore uses this to let X-Ray deliver spans into the agent's own log group rather
               // than the shared one. Scoped to that group: `PutResourcePolicy` is account-level in
@@ -690,8 +690,12 @@ export function createObservability(
   })
 
   // X-Ray writes the spans into the log group on the agent's behalf, so the *service* needs the
-  // grant. Without it the endpoint accepts the batch and the spans never appear, which is the silent
-  // failure this whole wiring exists to avoid.
+  // grant. Without it the endpoint answers 400 and the spans never appear.
+  //
+  // `CreateLogStream` as well as `PutLogEvents`, and the documentation does not say so: it states
+  // the policy "must allow X-Ray (xray.amazonaws.com) to call logs:PutLogEvents on that log group"
+  // and stops there. The `spans` stream does not exist until the first export, and X-Ray creates it
+  // — so `PutLogEvents` alone fails with "Caller is not authorized to call [logs:CreateLogStream]".
   new logs.CfnResourcePolicy(scope, 'SpanDeliveryPolicy', {
     policyName: `${projectName}-xray-span-delivery`,
     policyDocument: JSON.stringify({
@@ -701,8 +705,10 @@ export function createObservability(
           Sid: 'TransactionSearchXRayAccess',
           Effect: 'Allow',
           Principal: { Service: 'xray.amazonaws.com' },
-          Action: 'logs:PutLogEvents',
-          Resource: [`${logGroup.logGroupArn}:*`],
+          Action: ['logs:CreateLogStream', 'logs:PutLogEvents'],
+          // `logGroupArn` already ends in `:*`, which covers the streams. Appending another — as
+          // this did — renders `...:*:*` and matches nothing.
+          Resource: [logGroup.logGroupArn],
           Condition: {
             ArnLike: { 'aws:SourceArn': `arn:${stack.partition}:xray:${stack.region}:${stack.account}:*` },
             StringEquals: { 'aws:SourceAccount': stack.account },

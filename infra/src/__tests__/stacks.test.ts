@@ -975,8 +975,14 @@ describe('AgentStack — agent telemetry', () => {
     )
     expect(policy).toContain('xray.amazonaws.com')
     expect(policy).toContain('logs:PutLogEvents')
+    // `CreateLogStream` too, which the documentation omits: the `spans` stream does not exist until
+    // the first export and X-Ray is what creates it. Without this the endpoint answers 400 and every
+    // span is lost — which is exactly what the first deployment did.
+    expect(policy).toContain('logs:CreateLogStream')
     // Scoped to this account, so the statement cannot be used from another one.
     expect(policy).toContain('aws:SourceAccount')
+    // `logGroupArn` already ends in `:*`; a second one renders `:*:*` and matches no stream.
+    expect(policy).not.toContain(':*:*')
   })
 })
 
