@@ -25,10 +25,11 @@ function resolveGuardrail(
     // every prior turn is re-evaluated on every request, so guardrail cost grows with the square of
     // the conversation. Prior turns were already checked when they were new.
     guardLatestUserMessage: true,
-    // Redact rather than only block, and on both sides: a blocked *output* that stays in the
-    // message array would otherwise be persisted to the session snapshot and replayed into the next
-    // turn's context. `saveLatestOn: 'message'` in sessions.ts is what makes the redacted version
-    // the one that reaches storage.
+    // Redact rather than only block, and on both sides: a blocked *output* left in the message
+    // array would be replayed into the next turn's context and recorded as what the agent said.
+    // What makes the redacted version the stored one is that `index.ts` takes the turn from the
+    // agent's own message array once the stream completes, rather than reassembling it from the
+    // stream — so whatever the guardrail rewrote there is what `recordTurn` files.
     redaction: { input: true, output: true },
     trace: 'enabled',
   }

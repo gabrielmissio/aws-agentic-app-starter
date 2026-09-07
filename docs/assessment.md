@@ -2,17 +2,18 @@
 
 **Scope:** an independent evaluation of the template's engineering, setting the application domain
 aside.
-**Date:** 2026-09-06 · **Commit assessed:** `332d74f` (branch `license`)
-**Previous revision:** 2026-08-29 over `c2d05ae` · **Original issue:** 2026-08-28 over `6ca67f3`
-— §10 and §11 record what changed between them.
+**Date:** 2026-09-07 · **Commit assessed:** `5cfc27d` (branch `fix/assessment-v3`)
+**Previous revisions:** 2026-09-06 over `332d74f` · 2026-08-29 over `c2d05ae` · **Original issue:**
+2026-08-28 over `6ca67f3` — §10, §11 and §12 record what changed between them.
 **Goal:** determine whether the template is ready to accelerate (1) demos, (2) closed pilots
 including sensitive data, and (3) public production applications.
 
-> **On this revision.** The application source is byte-identical to `c2d05ae`, the commit of the
-> previous revision: `git diff --name-only c2d05ae..HEAD` reports no change to any `.ts`, `.tsx` or
-> `.mjs` file. What changed is repository governance, dependency versions and this document, which
-> was translated from Portuguese and re-verified line by line against the tree. §11 records the
-> delta and the corrections made to stale references.
+> **On this revision.** The application source is byte-identical to `c2d05ae`, two revisions back:
+> `git diff --name-only c2d05ae..HEAD` reports no change to any `.ts`, `.tsx` or `.mjs` file, so
+> every finding in §3-§8 carries over. This revision exists to correct one: the two previous
+> revisions recorded the agent container as having no `SIGTERM` handler and no `HEALTHCHECK`, in
+> four places, when both have been present since `3ee31cb` — a commit that predates the first of
+> those revisions. §12 records the correction and the re-verification pass that found it.
 
 ---
 
@@ -324,8 +325,6 @@ context ceiling (`agent/src/memory.ts`). The rest remain:
   opposite.
 - **No idempotency handling** on retried chat requests: a client retry produces a fresh invocation
   (and fresh token cost).
-- **No graceful shutdown in the agent container.** There is no `SIGTERM` handler and no `HEALTHCHECK`
-  in the Dockerfile — in-flight requests are cut on recycling.
 - **Chat errors are not localizable.** The `ErrorCode` contract (`chatbot-bff/src/errors.ts`) exists
   and is used by the admin routes, but the chat handler never imports it and emits raw English prose
   (`handler.ts:112`, `:132`, `:148`, `:230`). `retryAfterSeconds` is **sent by the BFF and ignored by
@@ -350,7 +349,7 @@ context ceiling (`agent/src/memory.ts`). The rest remain:
 | **P2** | A DR strategy: user-pool backup, declared RTO/RPO, incident runbook. | M |
 | **P2** | Load testing with a baseline for time-to-first-token and cost per conversation. | M |
 | **P2** | Unify the error contract: make `/chat` emit `{ code, error }` like the admin routes, and have the frontend consume `retryAfterSeconds`. | S |
-| **P2** | A `SIGTERM` handler + `HEALTHCHECK` in the agent container. | XS |
+| **✅ done** | ~~A `SIGTERM` handler + `HEALTHCHECK` in the agent container~~ — both present since `3ee31cb`: `agent/src/index.ts:147` drains in-flight requests on `SIGTERM`/`SIGINT`, `agent/Dockerfile:46` polls `/ping`. Recorded as absent by the two previous revisions; corrected in §12. | — |
 | **P3** | Move the Lambdas to `arm64` (Graviton) — roughly 20% cheaper for the same load profile. | XS |
 
 ---
@@ -503,10 +502,12 @@ original issue, now resolved: history survives restarts and is shared across rep
 no longer pinned to a container-local `Map`; the `CustomMessage` trigger never throws, degrading to
 the plain-text template (`index.mjs`); the admin invite falls back to the path without the locale
 attribute if the pool lacks it; the stream parser ignores unknown events; `complete()` is idempotent;
-memory degrades to "no history" (rather than failing) when `AGENTCORE_MEMORY_ID` is absent.
+memory degrades to "no history" (rather than failing) when `AGENTCORE_MEMORY_ID` is absent; the
+container drains in-flight requests on `SIGTERM`/`SIGINT` instead of cutting them mid-stream
+(`agent/src/index.ts:147`), and the image declares a `HEALTHCHECK` that polls `/ping`
+(`agent/Dockerfile:46`) for runners that do not probe it themselves.
 
-**Absent:** retry/backoff, circuit breaker, DLQ, reserved concurrency, `SIGTERM`, `HEALTHCHECK`, DR,
-and retry idempotency.
+**Absent:** retry/backoff, circuit breaker, DLQ, reserved concurrency, DR, and retry idempotency.
 
 ### 6.8 Scalability — 3.0/5
 
@@ -611,7 +612,8 @@ original issue and stay here as a record.
 | 16 | Versioning and access logging on S3; access logs on CloudFront (B9) | 2 | Security | S |
 | 17 | Unify the error contract on `/chat`; consume `retryAfterSeconds` in the frontend | 3 | Quality / UX | S |
 | 18 | Shorten refresh-token validity under `pilot`/`prod` + a revocation procedure (B8) | 2 | Security | XS |
-| 19 | `SIGTERM` + `HEALTHCHECK` in the container; Lambdas on `arm64` | 3 | Resilience / Cost | XS |
+| ✅ | ~~`SIGTERM` + `HEALTHCHECK` in the container~~ — both present since `3ee31cb`; recorded as absent in error until §12 | 3 | Resilience | done |
+| 19 | Lambdas on `arm64` (Graviton) — roughly 20% cheaper for the same load profile | 3 | Cost | XS |
 
 ---
 
@@ -824,3 +826,50 @@ during the pilot.
 the toolset performs no egress), items 2 and 3 are the difference between a conditional go and a
 clean one — both low effort. B9, `CODEOWNERS` and the `/chat` error contract do not block this
 scenario.
+
+---
+
+## 12. Revision — 2026-09-07 (`332d74f` → `5cfc27d`)
+
+A correction pass, not a new evaluation. The application source is unchanged since `c2d05ae`
+(`git diff --name-only c2d05ae..HEAD` reports no `.ts`, `.tsx` or `.mjs` file), so §3-§8 stand as
+written, with one exception.
+
+### The correction
+
+Two revisions of this document recorded, in four places, that the agent container has **no `SIGTERM`
+handler and no `HEALTHCHECK`**. Both have been present since `3ee31cb` — the same commit whose other
+work §10 credits — which predates both revisions. §11 claimed every claim had been re-verified
+against the tree; this one had not been.
+
+| Where | Was | Now |
+|---|---|---|
+| §5, scale and cost risks | "No graceful shutdown in the agent container" | Bullet removed |
+| §5, recommended actions | `P2` — add a `SIGTERM` handler + `HEALTHCHECK` | Marked done, with evidence |
+| §6.7, Resilience | Listed under **Absent** | Moved to **Present**, with file and line |
+| §7, consolidated backlog | Row 19, bundled with `arm64` | Split: the container half closed, `arm64` still open |
+
+`agent/src/index.ts:147` handles `SIGTERM` and `SIGINT` by calling `server.close()`, so in-flight
+turns finish instead of being cut mid-stream when AgentCore recycles the container.
+`agent/Dockerfile:46` declares a `HEALTHCHECK` that polls `/ping` with Node's own `fetch` (the slim
+image ships no curl). The Resilience score stays at **3.0/5**: retry/backoff, DLQ, reserved
+concurrency, DR and retry idempotency remain absent, and those are what hold the score down.
+
+### What else was re-checked
+
+Every other verifiable claim in the document was tested against the tree in this pass, including the
+ones most likely to rot — the line-number citations. All held: `agent/src/memory.ts:54`
+(`MAX_REPLAYED_MESSAGES`), `infra/src/stacks/agent-stack.ts:528` (`bedrockModelResources`),
+`chatbot-bff/src/handler.ts:112`/`:132`/`:148`/`:230` (raw English error prose) and `:149`
+(`retryAfterSeconds` emitted), the `CfnBudget` with no `costFilters`, `errors.ts` imported by the
+admin and conversation handlers but not the chat one, `retryAfterSeconds` unreferenced in the
+frontend, and the absence of reserved concurrency, DLQs and any retry policy on the AgentCore call.
+`npm run verify` exits 0 at 319 tests (`agent` 36 · `chatbot-bff` 107 · `infra` 97 ·
+`chatbot-frontend` 79); `npm run audit` exits 0.
+
+### The lesson this revision records
+
+A document that asserts "re-verified line by line" is making a claim about itself that nothing
+checks. The template's own thesis applies to its assessment: documentation is the control that fails.
+The claims worth trusting here are the ones carrying a file and a line, because those are the ones a
+reader can falsify in one command — which is how this error was eventually found.
