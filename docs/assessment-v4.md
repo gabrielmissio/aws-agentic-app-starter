@@ -1951,8 +1951,8 @@ architecture or security design. That is the profile of a foundation to build on
 (passing; one low dev-only advisory), and `cdk synth` under three profile configurations (demo:
 success; pilot unpinned: refused; pilot with sandbox defaults: refused with 10 named violations; pilot
 fully configured: success, 119 resources), plus static analysis of the four synthesized CloudFormation
-templates. No AWS resource was created or modified. No prior assessment was consulted. Section 20
-records the P0 remediation applied afterwards.*
+templates. No AWS resource was created or modified. No prior assessment was consulted. Sections 20 and 21
+record the P0 and P1 remediation applied afterwards.*
 
 ---
 
@@ -2003,6 +2003,145 @@ and is the half that actually followed a fork into its own codebase.
 
 ### Still open from this plan
 
-P1 in full (bound the agent loop, PITR and deletion protection, CI scanning, the eval set, the prompt
-hash, the `--ignore-scripts` asymmetry), P2 in full, and P3. Nothing in P0 remains except the `docs/`
-decision above.
+Nothing in P0 remains except the `docs/` decision above. P1 was applied next — see §21.
+
+---
+
+## 21. Addendum — P1 (effort S) remediation applied
+
+The five P1 items scoped **S** were applied. **P1-4 (an evaluation set, effort M) was not**, and
+remains the largest open gap in the Agentic AI Lens assessment. One item, P1-3, turned out to be two
+different sizes and was split on measurement rather than on estimate — see below.
+
+### P1-1 — the agent loop is bounded
+
+The finding: `createAgent` passed no `limits` and `BedrockModel` no `maxTokens`, so one authenticated
+request could drive an unbounded number of model calls.
+
+`agent/src/limits.ts` — which already held the body ceilings and is therefore where a reader looks —
+now also exports three loop ceilings, each configurable and each with the reasoning for its default:
+
+| Variable | Default | Bounds |
+|---|---:|---|
+| `AGENT_MAX_TURNS` | 10 | Model calls per turn. The predictable cap; an ordinary exchange needs one to three |
+| `AGENT_MAX_TOTAL_TOKENS` | 400,000 | Cumulative input + output across the turn. Deliberately generous — every call re-sends its context, so the counter compounds, and a tight value truncates real answers rather than catching runaways |
+| `AGENT_MAX_OUTPUT_TOKENS` | 8,192 | One model response, set on the model. The only cap that cannot be overshot |
+
+Three things beyond the caps themselves:
+
+- **They are passed on every call.** `agent.stream(prompt, { limits: agentLimits, cancelSignal })` —
+  verified in the built bundle, not only in source, because the SDK's contract is that an omitted
+  dimension is unlimited, so "forgot to pass it" and "chose no limit" are the same code.
+- **A disconnect now cancels the loop.** An `AbortController` aborts on the response's `close` event
+  when the stream has not already ended. Previously the BFF's 60s timeout ended the relay while the
+  container kept calling Bedrock for an answer nobody was reading.
+- **A cap firing is logged.** It produces no error and returns 200 with a short answer, so
+  `turn.limited` (with the correlation id, the stop reason and the caps in force) is the only thing
+  that distinguishes a capped turn from a model that had nothing more to say. `LIMIT_STOP_REASONS` is
+  asserted against the SDK's `StopReason` union so a rename cannot silently turn that line into one
+  that is never written.
+
+`agent/.env.example` documents all three with the arithmetic behind them. The boot line now reports
+`maxTurns` and `maxTotalTokens` alongside `guardrail`/`durableSessions`/`telemetry`.
+
+### P1-5 — the prompt has a version, and it reaches the trace
+
+`agent/src/agent.ts` exports `systemPromptVersion`: eight hex characters of a SHA-256 of the prompt
+itself, merged into `traceAttributes` as `gen_ai.system_instructions.version` **unconditionally**, so a
+directly invoked runtime that carries no `session.id` still carries this. Also printed at boot.
+
+A content hash rather than a hand-maintained number, because a version someone must remember to bump
+is one that silently stops matching the prompt.
+
+Testing this needed a detour worth recording: the SDK hands `traceAttributes` to a private tracer and
+exposes them nowhere on the instance, so asserting the computed value would have proved nothing about
+whether it was passed. `agent/src/__tests__/agent.test.ts` mocks the `Agent` constructor to observe the
+config — the same reason `app.test.ts` executes `app.ts` instead of only testing `config.ts`.
+
+### P1-2 — recoverability, separated from retention
+
+`ConversationTable` gains `pointInTimeRecoverySpecification` and `deletionProtection`; the user pool
+gains `deletionProtection`. Both track `RETAIN_DATA`, so a sandbox that opted out of retention is still
+destroyable rather than leaving `cdk destroy` wedged on a protected resource. The rate-limit table
+deliberately gets neither, and a test asserts that too — continuous backups on disposable counters are
+spend with nothing to recover.
+
+The point the finding made was that `RemovalPolicy.RETAIN` governs CloudFormation and nothing else: it
+survives `cdk destroy` and says nothing about a `DeleteTable` or `DeleteUserPool` call, or about a bad
+write. `infra/README.md` now carries a **What is recoverable, and what is not** table making that
+distinction per store — and naming the gap plainly:
+
+> **AgentCore Memory has no backup in this template.** The service offers no point-in-time restore and
+> nothing here exports events, so the conversation index can be restored while the transcripts it
+> points at cannot — which surfaces as sidebar rows that open empty.
+
+That is left as the correct default (an export job writes conversation content into a second store,
+which contradicts the promise `CONVERSATION_RETENTION_DAYS` makes) with the shape of the fix and the
+role it belongs on.
+
+### P1-3 — split on measurement: two of three delivered
+
+**Delivered.** `.github/workflows/ci.yml` now has three jobs instead of one, so a failure names which
+concern broke:
+
+- **`secrets`** — TruffleHog over the **whole git history** (`fetch-depth: 0`, `base: ''`), because a
+  credential committed once is leaked even after it is deleted, and a diff scan passes on a secret that
+  arrived before the pull request. `--results=verified,unknown` rather than `--only-verified`:
+  verification proves a credential is *live*, so verified-only reports nothing for a key that has
+  already been rotated, which is exactly what a history scan is for.
+  *Not* gitleaks-action, and for a reason specific to a template — it requires a paid
+  `GITLEAKS_LICENSE` for any organization-owned repository, so most forks that matter would inherit a
+  gate that fails until someone buys a key.
+- **`sast`** — CodeQL with `security-extended`, the one check here that reasons across files. Its
+  `security-events: write` is the only elevated grant in the workflow and is scoped to that job.
+
+Both actions are pinned to commit SHAs with the release in a trailing comment, matching the
+convention already in the file; all three SHAs in the workflow were confirmed against the GitHub API.
+`README.md`, `CONTRIBUTING.md` and `AGENTS.md` each claimed CI ran only `verify` and `audit` and were
+corrected — fixing drift while creating more would have been a poor trade.
+
+**Not delivered, and re-scoped on evidence: the IaC policy scan.** Measured rather than estimated.
+`cdk-nag` 3.0.2 was installed and run against all four stacks under a full pilot posture; note it no
+longer works as a CDK aspect at all — `AwsSolutionsChecks` has no `visit`, and the current integration
+is `Validations.of(app).addPlugins(...)`. It reports **51 errors and 4 warnings across 14 rules**:
+
+| Rule | Count | What it is |
+|---|---:|---|
+| `IAM5` | 62 | Wildcard resources — the ones §7 of this assessment already found to be the ones AWS gives no alternative for |
+| `IAM4` | 14 | CDK's own `AWSLambdaBasicExecutionRole` on generated roles |
+| `L1` | 5 | Lambda runtime not the newest |
+| `COG1`, `COG2`, `COG8` | 3 | Password policy, MFA, Plus tier — all of which the profile gate already requires under `pilot`/`prod` and deliberately relaxes under `demo` |
+| `CFR1`–`CFR4`, `S1`, `S10`, `APIG2`, `DDB3` | 8 | Geo restriction, CloudFront WAF, CloudFront logging, TLS, S3 access logs, SSL-only, request validation, PITR on the counters table |
+
+Every one needs either an evidenced suppression or a fix, and the judgement is per-finding: the `IAM5`
+and `IAM4` groups are suppressions, `COG*` and `DDB3` are suppressions that must explain the profile
+gate and the counters decision, and `CFR1`–`CFR3`, `S1` and `APIG2` are **not** suppressions at all —
+they are the P2 items already recorded here (P2-3, and the CloudFront hardening under §5.3). Writing 76
+suppressions, several of which would be wrong, is an M-to-L change and would have shipped a template
+whose forks inherit a large baseline of acknowledged findings.
+
+`cdk-nag` was uninstalled again so no unused dependency remains. The root README's "Root scripts"
+section now names the missing IaC scan and the reason it is not a one-liner, so the gap is stated rather
+than implied. **Recommendation: track the IaC policy scan as its own P2 item, effort M.**
+
+### Not applied
+
+**P1-4 — the evaluation set (effort M).** Out of scope for this pass and unchanged as a finding: all
+428 tests remain deterministic, and a prompt edit that degrades tool selection or weakens the identity
+instruction still ships with a green suite. This is the largest single gap in §8.
+
+### Verified after the changes
+
+| Check | Result |
+|---|---|
+| `npm run verify` | **Pass**, exit 0 — **428 tests** (agent 79 ← 74, bff 132, infra 133 ← 130, frontend 84) |
+| `npm run audit` | **Pass**, exit 0 |
+| Clean-room install | All five `node_modules` deleted, `npm run bootstrap` re-run with `--ignore-scripts` everywhere: **0 npm errors**, then `verify` green. This is what establishes that nothing in the tree needs a lifecycle script — `esbuild`, the only package with one, gets its platform binary through `optionalDependencies` |
+| `cdk synth`, demo | Success. `t-bff-conversations` renders `PointInTimeRecoveryEnabled: true` + `DeletionProtectionEnabled: true` + `DeletionPolicy: Retain`; `t-bff-rate-limit` renders neither and `DeletionPolicy: Delete`; the user pool renders `DeletionProtection: ACTIVE` |
+| Agent bundle | `tsup` build succeeds and the built `dist/index.js` contains `agent.stream(prompt, { limits: agentLimits, cancelSignal: ... })` and `gen_ai.system_instructions.version` — checked in the artifact, not only in source, because the wiring is the part no test observes |
+| Workflow | Parsed with `yaml.safe_load`: jobs `verify`, `secrets`, `sast`; `security-events: write` scoped to `sast` alone. All three action SHAs resolve to real commits (HTTP 200) |
+
+### Still open
+
+P1-4 (eval set, M). P2 in full, plus the re-scoped IaC policy scan. P3 in full. And the `docs/`
+decision recorded at the end of §20.
