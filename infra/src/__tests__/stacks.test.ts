@@ -1322,6 +1322,28 @@ describe('AgentStack — the runtime\'s own log group', () => {
     }
   })
 
+  /**
+   * The four permissions the audit destination needs, asserted because their absence reads as a
+   * missing feature rather than as missing IAM.
+   *
+   * Sending findings to a log group makes CloudWatch Logs configure a delivery on the caller's
+   * behalf, and it checks the caller for the rights to do that. Without them the whole
+   * `PutDataProtectionPolicy` call fails with "Not authorized to use the audit operation in the data
+   * protection policy" — no mention of IAM, of the destination, or of which action is missing.
+   */
+  it('grants the custom resource what the audit destination requires', () => {
+    const policies = JSON.stringify(Object.values(synthGoverned().findResources('AWS::IAM::Policy')))
+
+    for (const action of [
+      'logs:CreateLogDelivery',
+      'logs:PutResourcePolicy',
+      'logs:DescribeResourcePolicies',
+      'logs:DescribeLogGroups',
+    ]) {
+      expect(policies).toContain(action)
+    }
+  })
+
   /** An audit statement with no destination computes findings and drops them. */
   it('sends findings somewhere they can be read', () => {
     const { Statement } = maskingPolicyOf(synthGoverned())

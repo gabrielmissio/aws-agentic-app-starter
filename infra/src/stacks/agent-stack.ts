@@ -876,6 +876,25 @@ export function governRuntimeLogGroup(
       actions: ['kms:DescribeKey'],
       resources: [encryptionKey.keyArn],
     }),
+    // Required by the *audit* half of the data protection policy, because its findings go to a log
+    // group: CloudWatch Logs sets up a delivery to that destination on our behalf, and checks the
+    // caller for the permissions to do so. Without them `PutDataProtectionPolicy` fails with "Not
+    // authorized to use the audit operation in the data protection policy" — which reads like the
+    // account lacks a feature rather than like four missing IAM actions.
+    //
+    // `*` is the documented resource for all four; AWS lists them that way because the delivery and
+    // the resource policy it writes are not addressable before they exist. The equivalent grant for
+    // the telemetry log group is invisible here only because CloudFormation applies that one under
+    // the deployment role rather than through this Lambda.
+    new iam.PolicyStatement({
+      actions: [
+        'logs:CreateLogDelivery',
+        'logs:PutResourcePolicy',
+        'logs:DescribeResourcePolicies',
+        'logs:DescribeLogGroups',
+      ],
+      resources: ['*'],
+    }),
   ])
 
   /** Each call re-runs on every deploy, so the group converges even if someone edits it by hand. */

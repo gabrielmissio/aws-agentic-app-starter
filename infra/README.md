@@ -272,6 +272,38 @@ aws xray update-trace-segment-destination --destination CloudWatchLogs --region 
 Then wait for `ACTIVE` before re-running `cdk deploy`. Nothing needs to be rolled back or cleaned up
 first: the failed stack update leaves no partial delivery behind.
 
+### The deploy fails with "Not authorized to use the audit operation"
+
+`cdk deploy` rolls back on the agent stack with:
+
+```text
+Received response status [FAILED] from custom resource. Message returned: Not authorized to use the
+audit operation in the data protection policy
+```
+
+This reads like the account lacks a feature. It is four missing IAM actions.
+
+The data protection policy sends its audit findings to a log group. Configuring that makes CloudWatch
+Logs create a delivery and write a resource policy on the caller's behalf, and it checks the caller
+for the rights to do so — so `logs:PutDataProtectionPolicy` alone is not enough. AWS documents the
+set, and notes that a Lambda execution role performing the call needs them too:
+
+| Action | Resource |
+|---|---|
+| `logs:PutDataProtectionPolicy` | the log group |
+| `logs:CreateLogDelivery` | `*` |
+| `logs:PutResourcePolicy` | `*` |
+| `logs:DescribeResourcePolicies` | `*` |
+| `logs:DescribeLogGroups` | `*` |
+
+`governRuntimeLogGroup` grants all five to the custom resource that applies the policy. If you hit
+this after editing that function, check that the last four survived — they look like over-broad
+permissions worth trimming and they are not. The equivalent grant for the telemetry log group is
+invisible because CloudFormation applies that policy under the deployment role, not through a Lambda.
+
+See [IAM permissions required to create or work with a data protection
+policy](https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/data-protection-policy-permissions.html).
+
 ### The traces exist in the logs but the trace map is empty
 
 `aws xray get-trace-summaries` and `get-service-graph` return nothing, and Transaction Search shows
