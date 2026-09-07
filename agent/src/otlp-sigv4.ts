@@ -22,7 +22,8 @@
  */
 import { createHash, createHmac } from 'node:crypto'
 import { defaultProvider } from '@aws-sdk/credential-provider-node'
-import { ExportResultCode, type ExportResult } from '@opentelemetry/core'
+import { context } from '@opentelemetry/api'
+import { ExportResultCode, suppressTracing, type ExportResult } from '@opentelemetry/core'
 import { JsonTraceSerializer } from '@opentelemetry/otlp-transformer'
 import type { ReadableSpan, SpanExporter } from '@opentelemetry/sdk-trace-base'
 import { SignatureV4 } from '@smithy/signature-v4'
@@ -148,7 +149,13 @@ export class SigV4SpanExporter implements SpanExporter {
     const body = JsonTraceSerializer.serializeRequest(spans)
     if (!body) return resultCallback({ code: ExportResultCode.SUCCESS })
 
-    postSigned(this.endpoint, 'xray', this.region, body, this.headers)
+    // Suppressed for the same reason as the metrics exporter: resolving credentials calls STS or
+    // IMDS through the AWS SDK, which `instrumentation.ts` has patched. Tracing the export of a span
+    // produces a span, and a batch that never settles.
+    context
+      .with(suppressTracing(context.active()), () =>
+        postSigned(this.endpoint, 'xray', this.region, body, this.headers),
+      )
       .then(() => resultCallback({ code: ExportResultCode.SUCCESS }))
       .catch((error: Error) => {
         // Logged, not thrown: a telemetry backend that is refusing writes must not take the turn

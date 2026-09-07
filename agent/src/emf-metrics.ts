@@ -14,13 +14,14 @@
  * `gen_ai.agent.tool.duration`, `gen_ai.agent.model.latency` and `gen_ai.server.time_to_first_token`.
  * The assessment lists these as absent business metrics; they were never absent, only unexported.
  */
+import { context } from '@opentelemetry/api'
 import { randomUUID } from 'node:crypto'
 import {
   CloudWatchLogsClient,
   PutLogEventsCommand,
   CreateLogStreamCommand,
 } from '@aws-sdk/client-cloudwatch-logs'
-import { ExportResultCode, type ExportResult } from '@opentelemetry/core'
+import { ExportResultCode, suppressTracing, type ExportResult } from '@opentelemetry/core'
 import {
   AggregationTemporality,
   DataPointType,
@@ -163,7 +164,19 @@ export class EmfMetricExporter implements PushMetricExporter {
       })
   }
 
-  private async write(records: EmfRecord[]): Promise<void> {
+  /**
+   * Writes without tracing itself.
+   *
+   * Once `instrumentation.ts` patches the AWS SDK, every `PutLogEvents` here would raise a span —
+   * one per export interval, forever, describing nothing about any turn. Worse, those spans are
+   * themselves exported, so the telemetry would grow a steady background of telemetry about
+   * telemetry. `suppressTracing` marks this context as off-limits to the instrumentation.
+   */
+  private write(records: EmfRecord[]): Promise<void> {
+    return context.with(suppressTracing(context.active()), () => this.send(records))
+  }
+
+  private async send(records: EmfRecord[]): Promise<void> {
     if (!this.streamReady) {
       try {
         await this.client.send(

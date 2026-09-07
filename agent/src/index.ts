@@ -1,3 +1,7 @@
+// `instrumentation.ts` is deliberately *not* imported here. It patches the AWS SDK by intercepting
+// module loading, and every static import in this file is evaluated before the first line of it
+// runs — so an import here would register after the SDK clients below are already resolved, and
+// produce no spans at all. It is preloaded instead, via `node --import` in the `start` script.
 import express, { type NextFunction, type Request, type Response } from 'express'
 import { createAgent, isGuarded } from './agent'
 import { MAX_BODY_BYTES, MAX_BODY_LENGTH } from './limits'
