@@ -55,6 +55,10 @@ export function parsePrompt(raw: string): { caller?: Caller; message: string } {
   const message = raw.slice(messageAt + MESSAGE_HEADER.length).replace(/^\n+/, '')
 
   const field = (name: string): string | undefined => {
+    // `name` is never caller-supplied: every call site below passes a string literal, so there is no
+    // input here for a ReDoS pattern to arrive through. Kept dynamic because the alternative is three
+    // near-identical regexes that could drift from the wire format the BFF emits.
+    // nosemgrep: javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp
     const match = new RegExp(`^${name}:\\s*(.+)$`, 'm').exec(block)
     return match?.[1]?.trim() || undefined
   }

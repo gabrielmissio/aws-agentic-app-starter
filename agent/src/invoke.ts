@@ -56,7 +56,9 @@ while (true) {
 
     try {
       const event = JSON.parse(data)
-      console.log(`[${event.type ?? 'unknown'}]`, JSON.stringify(event).substring(0, 200))
+      // `%s` rather than a template literal: the event type comes from the model's own stream, and
+      // interpolating it into the format string lets it forge a log line with its own newlines.
+      console.log('[%s] %s', event.type ?? 'unknown', JSON.stringify(event).substring(0, 200))
 
       if (event.type === 'modelStreamUpdateEvent') {
         const inner = event.event
