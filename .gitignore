@@ -5,3 +5,4 @@ temp/
 cdk.out/
 .aws-sam/
 node_modules/
+semgrep.sarif

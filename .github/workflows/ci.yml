@@ -1,10 +1,13 @@
 name: CI
 
 # The whole gate runs on a clone with no configuration: no AWS credentials, no repository secrets, no
-# paid feature, no Docker image of ours to build. Every check reports through its own exit code rather
-# than uploading to GitHub's Security tab — which is deliberate, because code scanning uploads require
-# GitHub Code Security on a private repository, and a template must not ship a gate that only works
-# for whoever owns the original.
+# paid feature, no Docker image of ours to build. Every check *gates* through its own exit code, so a
+# fork on any plan gets the same red or green.
+#
+# Reporting is layered separately from gating, and deliberately so. `sast` renders its result to the
+# run summary and attaches the SARIF as an artifact — both free everywhere — and additionally uploads
+# to code scanning when the repository is public, where that is free. The upload is the only part
+# anyone can lose, and losing it costs a nicer view of a result that was already reported twice.
 
 on:
   push:
@@ -16,7 +19,8 @@ on:
     - cron: '17 4 * * 1'
   workflow_dispatch:
 
-# Nothing here writes. No job raises this.
+# Read-only by default. `sast` raises `security-events` on itself to publish its findings, and says so
+# there; nothing else in this workflow writes anything.
 permissions:
   contents: read
 
@@ -143,9 +147,12 @@ jobs:
   # ESLint enforces style and correctness; it is not a security analyser, and no rule in
   # `eslint.config.mjs` can follow a tainted value across files. Semgrep can.
   #
-  # Semgrep CE rather than CodeQL: CodeQL's upload needs GitHub Code Security, which is paid on private
-  # repositories, so the check every fork inherits would go red for reasons the fork cannot fix. This
-  # needs no account and no token; `p/default` is fetched anonymously from the public registry.
+  # Semgrep CE rather than CodeQL: CodeQL needs the code scanning upload to produce any result at all,
+  # and that upload is billed through GitHub Code Security on a private repository — so the check every
+  # fork inherits would go red for reasons the fork cannot fix. Semgrep needs no account and no token;
+  # `p/default` is fetched anonymously from the public registry, and it reports through the run summary
+  # whether or not the upload is available. That is the difference: here the upload is an enhancement,
+  # with CodeQL it is the product.
   #
   # Two findings are suppressed at the line, each with the evidence for it — see `agent/src/caller.ts`
   # and `chatbot-frontend/src/__tests__/qrcode.test.ts`. Suppress rather than lower the ruleset, so the
@@ -153,6 +160,12 @@ jobs:
   sast:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
+      # The one raise in this workflow, on the one job that publishes anything, and what it publishes
+      # is an analysis result attached to a commit. Scoped to this job rather than to the workflow so
+      # the other four keep the read-only default above.
+      security-events: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -161,8 +174,47 @@ jobs:
       # Run through the image rather than `pip install semgrep`, pinned by digest so the ruleset engine
       # is the one this was validated against. Installs nothing else: Semgrep reads source, so this job
       # has no `node_modules` and therefore nothing for it to waste time scanning.
+      #
+      # `-o` redirects only the formatted report, so the human-readable scan summary still reaches the
+      # log exactly as before; the SARIF is what the three steps below read.
       - name: Semgrep
         run: |
           docker run --rm -v "$PWD:/src" -w /src \
             semgrep/semgrep@sha256:51c9f53a4fce0d55e9abd08d7b96968654248a4b1122e77f20e0a49c0072446c \
-            semgrep scan --config p/default --error --metrics=off
+            semgrep scan --config p/default --error --metrics=off \
+              --sarif -o semgrep.sarif
+
+      # Every step below runs on `always()`, because `--error` makes the scan itself fail the moment
+      # it has something to report — and a run that found something is precisely the run whose report
+      # has to survive.
+
+      # Rendered on the run's own summary page, which is where someone looking at a red check already
+      # is. This is the half every fork gets whatever its plan: no permission, no paid feature, no
+      # account. It also shows what the console cannot — see `.github/semgrep-summary.jq`.
+      - name: Report
+        if: always()
+        run: jq -r -f .github/semgrep-summary.jq semgrep.sarif >> "$GITHUB_STEP_SUMMARY"
+
+      # The file itself, for a reviewer who wants it in a SARIF viewer rather than in a table.
+      - name: Upload SARIF
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: semgrep-sarif
+          path: semgrep.sarif
+
+      # The best of the three when it is available: alerts in the Security tab, annotations on the
+      # changed lines of a pull request, and a history that can tell a new finding from a standing one.
+      #
+      # Conditional because that availability is exactly what a template cannot assume. Code scanning
+      # is free on a public repository and billed through GitHub Code Security on a private one, so an
+      # unconditional upload would go red in a private fork for a reason the fork cannot fix — the
+      # failure mode the rest of this workflow is built to avoid. `continue-on-error` covers the
+      # remaining case, a public repository whose owner has turned the feature off.
+      - name: Code scanning
+        if: always() && github.event.repository.visibility == 'public'
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
