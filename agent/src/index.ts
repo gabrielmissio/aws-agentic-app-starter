@@ -67,6 +67,23 @@ app.post(
         // That turn still answers, but it starts empty and is never recorded.
         const agent = createAgent(history)
         for await (const event of agent.stream(prompt)) {
+          // A failed model or tool call arrives as an ordinary lifecycle event carrying an `error`
+          // and does not throw: the stream finishes, this handler answers 200, and the BFF relays a
+          // `done` that says ok. Without this line the log group shows a turn that looks entirely
+          // successful, and the only place the failure exists is the browser's event stream.
+          const failure = (event as { error?: { message?: unknown } }).error
+          if (failure?.message) {
+            console.error(
+              JSON.stringify({
+                level: 'error',
+                event: 'turn.failed',
+                correlationId,
+                sessionId,
+                reason: String(failure.message),
+              }),
+            )
+          }
+
           const json = JSON.stringify(event)
           res.write(`data: ${json}\n\n`)
         }

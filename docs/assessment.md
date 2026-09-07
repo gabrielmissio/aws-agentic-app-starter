@@ -897,6 +897,18 @@ that added a tool, while `AGENTS.md` told the reader that an invariant test goin
 security boundary was crossed — a contradiction that taught forks to edit tests. It now asserts that
 the system prompt names every tool that exists, which is a property a growing toolset keeps.
 
+### One defect found by running it
+
+Deploying to an account with no Marketplace agreement for the configured model produced four healthy
+stacks and a chat that answered with an empty bubble. The failure was real and complete — it just
+had nowhere to appear: a failed model call arrives as an ordinary lifecycle event carrying an
+`error`, which `stream-parser.ts` skipped by name as noise, so the runtime answered 200, the BFF
+relayed a `done` reporting success, and the only copy of the reason was in the browser's event
+stream. Fixed at both ends — the parser now surfaces an error carried on any event and names a turn
+that ends with neither text nor a reason, and the agent logs a `turn.failed` line with the
+correlation id. The class matters more than the instance: every model-layer failure, throttling and
+blocked completions included, was silent in exactly this way.
+
 ### What this does not close
 
 The chat handler is still untested, and it is the one that relays model output: its fail-closed path

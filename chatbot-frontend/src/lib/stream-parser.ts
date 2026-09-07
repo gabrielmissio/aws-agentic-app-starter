@@ -3,6 +3,19 @@
  * `agent.stream() → toJSON()`; anything unrecognized is skipped rather than treated as an error.
  */
 
+/**
+ * The turn ended without producing a reply and without saying why.
+ *
+ * Distinct from a reported failure because there is no server message to show: the UI has to supply
+ * its own wording, and it can only do that if it can tell the two apart.
+ */
+export class EmptyReplyError extends Error {
+  constructor() {
+    super('The agent finished without producing a reply.')
+    this.name = 'EmptyReplyError'
+  }
+}
+
 export interface StreamCallbacks {
   /** One visible text token, with `<thinking>` already stripped. */
   onToken: (text: string) => void
@@ -110,6 +123,9 @@ export async function parseAgentCoreStream(
   const decoder = new TextDecoder()
   let buffer = ''
   let completed = false
+  /** Whether the model produced any text this turn, and whether a failure was already reported. */
+  let produced = false
+  let failed = false
 
   /**
    * Fires exactly once. A finished turn arrives as *both* a `modelMessageStopEvent` with `endTurn`
@@ -119,6 +135,13 @@ export async function parseAgentCoreStream(
   const complete = () => {
     if (completed) return
     completed = true
+
+    // A turn that ends having produced neither text nor a reported error is the silent-failure
+    // shape: every layer behaved — the runtime answered 200, the BFF relayed every chunk and said
+    // `done: ok` — and the user is left with an empty bubble and nothing to report. A reply with no
+    // content is not a reply, so it is named rather than rendered.
+    if (!produced && !failed) callbacks.onError(new EmptyReplyError())
+
     callbacks.onComplete()
   }
   const thinkingFilter = createThinkingFilter(callbacks)
@@ -152,6 +175,23 @@ export async function parseAgentCoreStream(
 
         const eventType = chunk.type as string | undefined
 
+        // ── Any event carrying an error → the turn failed ────────────────
+        // A failed model call arrives as an ordinary lifecycle event with an `error` on it, and
+        // then the stream ends normally: nothing throws, the runtime answers 200, and the BFF
+        // relays a `done` that says ok. Treating those events as noise is what turned "Model
+        // access is denied" into an empty bubble that could only be read in devtools.
+        //
+        // Checked on every event rather than on `afterModelCallEvent` alone: the same shape carries
+        // a failed tool call and a failed invocation, and a turn can only fail in ways this file
+        // has not been told about yet.
+        const failure = chunk.error as { message?: unknown } | undefined
+        if (typeof failure?.message === 'string' && failure.message) {
+          failed = true
+          thinkingFilter.flush()
+          callbacks.onError(new Error(failure.message))
+          continue
+        }
+
         // ── modelStreamUpdateEvent → wraps raw ModelStreamEvent ──────────
         if (eventType === 'modelStreamUpdateEvent') {
           const inner = chunk.event as Record<string, unknown> | undefined
@@ -161,6 +201,7 @@ export async function parseAgentCoreStream(
           if (innerType === 'modelContentBlockDeltaEvent') {
             const delta = inner.delta as Record<string, string> | undefined
             if (delta?.type === 'textDelta' && delta.text != null) {
+              if (delta.text) produced = true
               thinkingFilter.push(delta.text)
             }
             if (delta?.type === 'reasoningContentDelta' && delta.text) {

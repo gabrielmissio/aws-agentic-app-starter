@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseAgentCoreStream, type StreamCallbacks } from '../lib/stream-parser'
+import { EmptyReplyError, parseAgentCoreStream, type StreamCallbacks } from '../lib/stream-parser'
 
 function makeCallbacks() {
   const tokens: string[] = []
@@ -146,6 +146,72 @@ describe('parseAgentCoreStream', () => {
     expect(h.text).toBe('ok')
     expect(h.errors).toEqual([])
     expect(h.completed).toBe(1)
+  })
+
+  it('surfaces a failed model call instead of skipping it as lifecycle noise', async () => {
+    // The shape that shipped an empty bubble: the model call fails, the event carrying the reason
+    // looks like every other lifecycle event, the stream ends cleanly and `done` reports ok. The
+    // message is the only place the actual cause exists, so it has to reach the caller verbatim.
+    const c = makeCallbacks()
+    const denied =
+      'Model access is denied due to IAM user or service role is not authorized to perform the ' +
+      'required AWS Marketplace actions (aws-marketplace:ViewSubscriptions, aws-marketplace:Subscribe)'
+
+    await parseAgentCoreStream(
+      sseResponse([
+        `data: ${JSON.stringify({ type: 'afterModelCallEvent', attemptCount: 1, error: { message: denied } })}\n\n`,
+        `data: ${JSON.stringify({ type: 'afterInvocationEvent' })}\n\n`,
+        'data: [DONE]\n\n',
+      ]),
+      c.callbacks,
+    )
+
+    expect(c.errors.map((error) => error.message)).toEqual([denied])
+    expect(c.completed).toBe(1)
+  })
+
+  it('reports an error carried on any event, not only the model call', async () => {
+    // A turn can fail in ways this parser has not been told about; the `error` shape is the signal.
+    const c = makeCallbacks()
+
+    await parseAgentCoreStream(
+      sseResponse([
+        `data: ${JSON.stringify({ type: 'afterToolCallEvent', error: { message: 'tool exploded' } })}\n\n`,
+      ]),
+      c.callbacks,
+    )
+
+    expect(c.errors.map((error) => error.message)).toEqual(['tool exploded'])
+  })
+
+  it('names a turn that ends without producing a reply, rather than completing silently', async () => {
+    const c = makeCallbacks()
+
+    await parseAgentCoreStream(sseResponse([`data: ${JSON.stringify({ type: 'afterInvocationEvent' })}\n\n`]), c.callbacks)
+
+    expect(c.errors).toHaveLength(1)
+    expect(c.errors[0]).toBeInstanceOf(EmptyReplyError)
+    expect(c.completed).toBe(1)
+  })
+
+  it('reports no empty-reply error when the turn actually replied', async () => {
+    const c = makeCallbacks()
+
+    await parseAgentCoreStream(sseResponse([textDelta('hello'), messageStop('endTurn')]), c.callbacks)
+
+    expect(c.errors).toEqual([])
+    expect(c.text).toBe('hello')
+  })
+
+  it('reports a failure once, without also claiming the reply was empty', async () => {
+    const c = makeCallbacks()
+
+    await parseAgentCoreStream(
+      sseResponse([`data: ${JSON.stringify({ type: 'afterModelCallEvent', error: { message: 'throttled' } })}\n\n`]),
+      c.callbacks,
+    )
+
+    expect(c.errors.map((error) => error.message)).toEqual(['throttled'])
   })
 
   it('surfaces a missing body as an error instead of hanging', async () => {

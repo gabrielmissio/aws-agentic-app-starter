@@ -92,6 +92,7 @@ export const enUS = {
   'chat.statusUsingTool': 'Using {tool}',
   'chat.errorGeneric': 'Something went wrong. Please try again.',
   'chat.errorWithMessage': 'Something went wrong: {message}',
+  'chat.errorEmptyReply': 'The agent finished without sending a reply. Please try again.',
   'chat.suggestionDayLabel': 'What day is it?',
   'chat.suggestionDayPrompt': "What's today's date, and how many days are left in the month?",
   'chat.suggestionIdeaLabel': 'Think something through',

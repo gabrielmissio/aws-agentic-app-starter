@@ -50,6 +50,12 @@ agent answers. To make that account an admin, see
 [infra/README.md](infra/README.md#managing-users-and-admins); for what every variable does, see
 [infra/.env.example](infra/.env.example).
 
+If that first message comes back refusing on **model access** rather than answering, the account has
+no Marketplace agreement for the model yet — a one-time step this deploy cannot take for itself, and
+the one failure here that a green `cdk deploy` does not predict. The fix, and why it is not an IAM
+change, is in
+[infra/README.md](infra/README.md#model-access-is-denied-on-the-first-message).
+
 ## Architecture
 
 <picture>
