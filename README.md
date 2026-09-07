@@ -182,6 +182,12 @@ What the suites are for beyond the obvious: `infra/` asserts the security proper
 the synthesized template (`aws-cdk-lib/assertions`), and `agent/` + `chatbot-bff/` each assert one
 half of the identity block's wire format, which the two packages cannot share by import.
 
+The rules that decide *who gets in* are covered twice over — once as a rule, once at the point it is
+consulted. `session.ts` and `admin.ts` are tested directly; the handlers around them are tested for
+calling those rules and reaching no store when they say no, because a rule that holds in isolation
+and is never consulted protects nothing. `infra/src/__tests__/app.test.ts` does the same for the
+profile gate: `config.test.ts` covers the rules, that file covers `app.ts` actually calling them.
+
 `AgentStack` is never synthesized in `infra/`'s suite — constructing it builds a real Docker image.
 Its invariants are asserted by reading the source instead, which is how the runtime's absent
 authorizer configuration and its narrow ECR grant stay covered; add to that suite the same way.
@@ -223,7 +229,10 @@ It is scaffolding, not a finished product. What is deliberately yours:
   `OTEL_EXPORTER_OTLP_ENDPOINT` points somewhere — where that collector lives is a deployment's
   decision.
 * **There is no CD pipeline.** Deploys run from a developer's machine with ambient credentials, and
-  CI never runs `cdk synth` — so a change that breaks the profile gate still passes CI.
+  CI never runs `cdk synth` — constructing `AgentStack` builds the agent image, so a synth in CI
+  would need Docker. The gate itself is covered without one: `infra/src/__tests__/app.test.ts`
+  executes `app.ts` under `pilot` and asserts it refuses, which throws before the first construct.
+  What CI still cannot catch is a template that synthesizes but describes the wrong resource.
 
 Before a pilot with real users: set `DEPLOY_PROFILE=pilot` and fix what it refuses, pin
 `DEPLOY_ACCOUNT`/`DEPLOY_REGION`, turn on `WAF_ENABLED`, and decide what your tools may reach.

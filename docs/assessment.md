@@ -2,7 +2,8 @@
 
 **Scope:** an independent evaluation of the template's engineering, setting the application domain
 aside.
-**Date:** 2026-09-07 · **Commit assessed:** `5cfc27d` (branch `fix/assessment-v3`)
+**Date:** 2026-09-07 · **Commit assessed:** `5cfc27d`, plus the changes made on branch
+`fix/assessment-v3` and recorded in §12
 **Previous revisions:** 2026-09-06 over `332d74f` · 2026-08-29 over `c2d05ae` · **Original issue:**
 2026-08-28 over `6ca67f3` — §10, §11 and §12 record what changed between them.
 **Goal:** determine whether the template is ready to accelerate (1) demos, (2) closed pilots
@@ -48,7 +49,7 @@ metrics, and handler test coverage. None is the wide hole the first issue descri
 |---|---|---|
 | Architecture | 4.5/5 | A clear, coherent and (almost entirely) tested trust boundary; three Lambdas with separated privileges over memory. |
 | Code quality | 4.5/5 | Strict TS, pure modules separated from I/O, comments that explain the *why*. |
-| Tests and quality gates | 4.0/5 | 319 tests of very high quality — untested handlers remain, and coverage is never measured. |
+| Tests and quality gates | 4.0/5 | 349 tests of very high quality. The authorization surface of two of the three handlers and the gate's wiring are now covered (§12); the chat handler and measured coverage remain open. |
 | Security | 4.5/5 | Real least-privilege IAM, now with an own CMK across every store; missing mandatory WAF and network isolation. |
 | AWS infrastructure | 4.0/5 | 100% IaC, explicit dependencies, KMS shared across stacks; no VPC and no multi-account strategy. |
 | Observability | 3.5/5 | X-Ray on 3 Lambdas + stage, OTel in the agent, end-to-end correlation id, structured logging. Missing dashboard, SLO and business metrics. |
@@ -70,7 +71,7 @@ complemented by real execution:
 
 | Check executed | Result |
 |---|---|
-| `npm run verify` (lint + typecheck + test) | ✅ **Exit 0** — 319 tests, all passing |
+| `npm run verify` (lint + typecheck + test) | ✅ **Exit 0** — 349 tests, all passing |
 | `npm run audit` (`--audit-level=high`) | ✅ **Exit 0** — 2 *low* findings (the same esbuild advisory in `agent` and `chatbot-bff`, dev-only, Windows dev server); nothing moderate or above |
 | CloudFormation synthesis of `auth`, `bff`, `frontend` | ✅ resources generated, inspected property by property |
 | Inventory of hardening properties in the synthesized template | See §6.6 |
@@ -240,10 +241,13 @@ addresses the superlinear cost noted in §5.
   asserted (`stacks.test.ts:806`), as are the ECR scope and the log groups — but the stack is never
   synthesized, so the runtime's environment variables, the execution role's trust policy and the
   `lifecycleConfiguration` remain uncovered.
-- **No handler tests.** `handler.ts` and `admin-handler.ts` have no test at all — only their pure
-  helpers do. Untested: the *fail-closed* path when `claims.sub` is absent (`handler.ts:123-128`),
-  and the **silent rate-limit bypass** when `RATE_LIMIT_TABLE_NAME` is empty (`handler.ts:17`,
-  `:142`).
+- **The chat handler has no test.** `admin-handler.ts` and `conversations-handler.ts` are covered as
+  of §12 — including every denial path, each asserting that no AWS client was called. `handler.ts`
+  is not, and it is the one that matters most: the *fail-closed* path when `claims.sub` is absent
+  (`handler.ts:123-128`) and the **silent rate-limit bypass** when `RATE_LIMIT_TABLE_NAME` is empty
+  (`handler.ts:17`, `:142`) are still uncovered. It is also the awkward one to test — a
+  `streamifyResponse` handler needs the `awslambda` global faked — which is why it did not come with
+  the other two.
 - **`infra/lambdas/custom-message/` has no test**, despite sitting on the critical path of `SignUp`
   and `AdminCreateUser`. The module even exports `resetAppUrlCache` as a "test seam"
   (`index.mjs:35`) — which no test uses.
@@ -416,11 +420,12 @@ other.
 
 ### 6.3 Tests and quality gates — 4.0/5
 
-**319 tests, all passing** (infra 97 · frontend 79 · bff 107 · agent 36). The quality remains
+**349 tests, all passing** (infra 102 · frontend 79 · bff 132 · agent 36). The quality remains
 exceptional: the tests assert *invariants together with their stated failure mode*, not
 implementation. The newer ones cover privilege separation across the three Lambdas over memory, the
 correlation id's wire format, conditional durability (`memory.test.ts`) and the added gate rules.
-Original highlights still standing:
+The newest ones (§12) close the gap between a rule and the code that consults it. Original
+highlights still standing:
 
 - `gates every method on the API behind the Cognito authorizer` (`stacks.test.ts:569`) **enumerates**
   every method in the template instead of listing known routes — a new route is born covered.
@@ -434,7 +439,7 @@ Original highlights still standing:
 | Gap | Impact |
 |---|---|
 | `AgentStack` never synthesized — runtime env vars, trust policy and lifecycle uncovered (the absence of `authorizerConfiguration` **is** asserted, by source reading) | Medium |
-| No handler tests (`handler.ts`, `admin-handler.ts`) | High |
+| No test for the **chat** handler `handler.ts` — fail-closed and rate-limit bypass (the admin and conversation handlers are covered as of §12) | High |
 | `infra/lambdas/custom-message/` untested, on the sign-up critical path | Medium |
 | No React component tests (declared deliberate in `chatbot-frontend/vitest.config.ts`) | Medium |
 | No integration or E2E tests | Medium |
@@ -596,7 +601,7 @@ original issue and stay here as a record.
 | ✅ | ~~`LICENSE`, `SECURITY.md`, contribution guide, PR template~~ — added 2026-09-06 (§11); `CODEOWNERS` still open | 1, 2 | Governance | done |
 | 1 | VPC + endpoints + egress control for the runtime (B2) | 2 | Infra / Security | M |
 | 2 | A CD pipeline with OIDC, `cdk diff` on PRs, protected environments, rollback (B7) | 2, 3 | CI/CD | L |
-| 3 | Handler tests (fail-closed, rate-limit bypass, `custom-message`, conversations) | 2 | Tests | M |
+| 3 | Handler tests for the **chat** handler (fail-closed with no `claims.sub`, rate-limit bypass with an absent table) and for `custom-message` — the conversations and admin handlers are covered as of §12 | 2 | Tests | S |
 | 4 | Mandatory WAF (or an explicit choice the gate demands) under `pilot`/`prod` (B6) | 2 | Security | S |
 | 5 | Custom domain + ACM + `TLSv1.2_2021` + WAF on CloudFront | 3 | Security | M |
 | 6 | SES connected (verified domain, DKIM, sandbox exit) | 3 | Infra | M |
@@ -656,7 +661,7 @@ Recorded in fairness — these are points that rarely appear in comparable templ
 
 ### Verification executed in this revision (`332d74f`)
 
-- `npm run verify` → **exit 0**, 319 tests passing (infra 97 · frontend 79 · bff 107 · agent 36).
+- `npm run verify` → **exit 0**, 349 tests passing (infra 102 · frontend 79 · bff 132 · agent 36).
 - `npm run audit` (`--audit-level=high`) → **exit 0**: 2 *low* findings, both the same esbuild
   advisory (dev-only, Windows dev server) in `agent` and `chatbot-bff`; nothing moderate or above in
   any package.
@@ -829,9 +834,9 @@ scenario.
 
 ---
 
-## 12. Revision — 2026-09-07 (`332d74f` → `5cfc27d`)
+## 12. Revision — 2026-09-07 (`332d74f` → branch `fix/assessment-v3`)
 
-A correction pass, not a new evaluation. The application source is unchanged since `c2d05ae`
+A correction pass and the smallest slice of the backlog that carried no deployment risk. The application source is unchanged since `c2d05ae`
 (`git diff --name-only c2d05ae..HEAD` reports no `.ts`, `.tsx` or `.mjs` file), so §3-§8 stand as
 written, with one exception.
 
@@ -864,8 +869,8 @@ ones most likely to rot — the line-number citations. All held: `agent/src/memo
 (`retryAfterSeconds` emitted), the `CfnBudget` with no `costFilters`, `errors.ts` imported by the
 admin and conversation handlers but not the chat one, `retryAfterSeconds` unreferenced in the
 frontend, and the absence of reserved concurrency, DLQs and any retry policy on the AgentCore call.
-`npm run verify` exits 0 at 319 tests (`agent` 36 · `chatbot-bff` 107 · `infra` 97 ·
-`chatbot-frontend` 79); `npm run audit` exits 0.
+`npm run verify` exited 0 at 319 tests before the work below, and at 349 after
+(`agent` 36 · `chatbot-bff` 132 · `infra` 102 · `chatbot-frontend` 79); `npm run audit` exits 0.
 
 ### The lesson this revision records
 
@@ -873,3 +878,28 @@ A document that asserts "re-verified line by line" is making a claim about itsel
 checks. The template's own thesis applies to its assessment: documentation is the control that fails.
 The claims worth trusting here are the ones carrying a file and a line, because those are the ones a
 reader can falsify in one command — which is how this error was eventually found.
+
+### What was closed from the backlog
+
+Backlog items 3 and 14 in part, chosen on the same criterion: highest confidence gained per unit of
+risk taken. Nothing below changes a line of application behavior — every change is a test, or a
+comment describing one.
+
+| Added | Closes | Proof it has teeth |
+|---|---|---|
+| `chatbot-bff/src/__tests__/conversations-handler.test.ts` (12 tests) | The routes that can read and erase conversation content had no test at the point they consult `belongsToCaller` | Deleting the ownership check from the handler turns exactly the three ownership tests red |
+| `chatbot-bff/src/__tests__/admin-handler.test.ts` (13 tests) | The one role that can mint an account and grant it the admin group had no test at its privilege boundary | Every denial case also asserts Cognito was never called — a 403 after the user is created is not a denial |
+| `infra/src/__tests__/app.test.ts` (5 tests) | `app.ts` was executed by nothing in CI, so dropping the gate call shipped green | Removing `assertDeploymentPosture` from `app.ts` turns two tests red. It needs no Docker: the refusal throws 16 lines before the first construct |
+| A structural identity check in `agent/src/__tests__/tools.test.ts` | The template's headline invariant was a case-sensitive substring search for two spellings | A tool with `filter: { signedInUserId }` now fails; under the old check it passed |
+
+The toolset test that asserted a fixed list of tool names was also replaced. It broke on any fork
+that added a tool, while `AGENTS.md` told the reader that an invariant test going red means a
+security boundary was crossed — a contradiction that taught forks to edit tests. It now asserts that
+the system prompt names every tool that exists, which is a property a growing toolset keeps.
+
+### What this does not close
+
+The chat handler is still untested, and it is the one that relays model output: its fail-closed path
+and the rate-limit bypass with an absent table remain the highest-value tests missing. Coverage is
+still unmeasured, `custom-message` still untested, and CI still runs no `cdk synth`. The scores in §1
+are unchanged — two of three handlers and one wiring seam do not move a dimension on their own.

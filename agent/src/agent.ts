@@ -59,7 +59,7 @@ const tools = createTools()
  * thing a new project has to unpick, and every extra rule competes for the model's attention with
  * the ones that matter to *your* domain. Replace "What you can do" as you add tools.
  */
-const systemPrompt = `
+export const systemPrompt = `
 You are a helpful personal assistant. You answer questions, think things through with the user, and
 use your tools when a task needs real information rather than a guess.
 
