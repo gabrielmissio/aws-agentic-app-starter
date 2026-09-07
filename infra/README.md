@@ -222,3 +222,60 @@ CNAMEs, then request production access (the SES sandbox only delivers to *verifi
 which an invite flow cannot use). Then add
 `email: cognito.UserPoolEmail.withSES({ fromEmail, fromName, sesVerifiedDomain })` to the `UserPool`
 in `auth-stack.ts`.
+
+## Troubleshooting
+
+### Model access is denied on the first message
+
+The deploy is green, all four stacks are up, and the first message in the chat comes back with this
+inside a streamed chunk:
+
+```text
+Model access is denied due to IAM user or service role is not authorized to perform the required
+AWS Marketplace actions (aws-marketplace:ViewSubscriptions, aws-marketplace:Subscribe) to enable
+access to this model.
+```
+
+Nothing is misconfigured. Third-party models are sold through AWS Marketplace, and the **first**
+invocation of one in an account makes Bedrock create the subscription in the background — which
+requires the *invoking* principal to hold `aws-marketplace:Subscribe` and `ViewSubscriptions`. Here
+the invoking principal is the AgentCore runtime's execution role, scoped in `agent-stack.ts` to
+`bedrock:InvokeModel*` on one model and nothing else. So the auto-enablement fails, and it fails at
+*chat* time rather than at deploy time — the stacks describe a runtime that is perfectly valid and
+cannot yet reach a model.
+
+The agreement is **per model, not per provider or per account**, so this returns every time
+`BEDROCK_MODEL_ID` moves to a model this account has never invoked — including the first deploy of
+this template, whichever model it names. The error also confirms the id is *valid*: an unknown one
+fails validation long before Marketplace is consulted.
+
+**Fix it once, with an admin identity — not with the runtime role.** Needs AWS CLI 2.27.42+:
+
+```bash
+# The FOUNDATION MODEL id: no `us.`/`eu.`/`global.` prefix, which names an inference profile.
+MODEL=anthropic.claude-sonnet-5
+REGION=us-east-1
+
+aws bedrock get-foundation-model-availability --model-id $MODEL --region $REGION
+aws bedrock list-foundation-model-agreement-offers --model-id $MODEL --region $REGION
+aws bedrock create-foundation-model-agreement --model-id $MODEL --offer-token <OFFER_TOKEN> --region $REGION
+aws bedrock get-foundation-model-availability --model-id $MODEL --region $REGION
+```
+
+The last call should report `agreementAvailability.status: AVAILABLE`. Wait about two minutes before
+retrying the chat — the subscription is not instant, and calls in between still fail the same way.
+Subscribing in one Region makes the model available to request in every Region it is offered in, so
+a geography-scoped inference profile needs this done once, in the source Region.
+
+Opening the model once in the Bedrock console playground, signed in as someone who holds the
+Marketplace permissions, does the same thing through the same auto-enablement path.
+
+If the agreement call asks for a use-case form, that is Anthropic's First Time Use requirement —
+once per account, or once at an organization's management account, covering every Anthropic model.
+`aws bedrock put-use-case-for-model-access` submits it.
+
+**Do not fix this by granting `aws-marketplace:Subscribe` to the runtime role.** AWS is explicit that
+the permission is needed only the first time a model is used in an account, and never afterwards, so
+it would be a permanent grant bought for a one-time step — one that lets a container which relays
+untrusted model output subscribe the account to arbitrary Marketplace products. Enable the model out
+of band and the role works as it is written.
