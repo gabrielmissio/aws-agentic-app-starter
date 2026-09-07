@@ -66,9 +66,9 @@ describe('resolveSessionId', () => {
   })
 
   /**
-   * The id becomes an S3 key prefix in `agent/src/sessions.ts`, where the Strands session store
-   * validates it against this exact pattern. A colon — the separator this used to use — fails it,
-   * and would surface as a snapshot write throwing mid-turn rather than as a rejected request.
+   * The id travels as AgentCore's `runtimeSessionId` and as the `sessionId` on every memory event
+   * (`agent/src/memory.ts`). A colon — the separator this used to use — leaves this class, and would
+   * surface as a memory write throwing mid-turn rather than as a rejected request.
    */
   it('produces an id the conversation store will accept as a key', () => {
     expect(resolveSessionId(undefined, ALICE)).toMatch(/^[a-z0-9_-]+$/)

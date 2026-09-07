@@ -824,24 +824,24 @@ describe('the agent may invoke one model, not every model', () => {
   it('covers both the inference profile and the model it resolves to', () => {
     // A cross-region profile invokes the foundation model in whichever member region it routes to,
     // so a policy naming only one of the two denies every call.
-    const arns = bedrockModelResources(scope, 'global.anthropic.claude-sonnet-4-6')
+    const arns = bedrockModelResources(scope, 'us.anthropic.claude-sonnet-5')
 
-    expect(arns).toContain('arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-4-6')
+    expect(arns).toContain('arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-5')
     expect(arns).toContain(
-      'arn:aws:bedrock:*:123456789012:inference-profile/global.anthropic.claude-sonnet-4-6',
+      'arn:aws:bedrock:*:123456789012:inference-profile/us.anthropic.claude-sonnet-5',
     )
   })
 
   it('names the model directly when the id is not a profile', () => {
-    const arns = bedrockModelResources(scope, 'anthropic.claude-sonnet-4-6')
+    const arns = bedrockModelResources(scope, 'anthropic.claude-sonnet-5')
 
-    expect(arns).toEqual(['arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-4-6'])
+    expect(arns).toEqual(['arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-5'])
   })
 
   it('never widens to every model or every Bedrock resource', () => {
     // The posture this replaced: `foundation-model/*` in every region plus `bedrock:*` in the
     // account — a budget with no ceiling and a data path with no boundary.
-    for (const id of ['global.anthropic.claude-sonnet-4-6', 'anthropic.claude-sonnet-4-6']) {
+    for (const id of ['us.anthropic.claude-sonnet-5', 'anthropic.claude-sonnet-5']) {
       for (const arn of bedrockModelResources(scope, id)) {
         expect(arn).not.toMatch(/foundation-model\/\*/)
         expect(arn).not.toMatch(/:bedrock:[^:]*:[^:]*:\*$/)

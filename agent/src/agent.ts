@@ -25,10 +25,11 @@ function resolveGuardrail(
     // every prior turn is re-evaluated on every request, so guardrail cost grows with the square of
     // the conversation. Prior turns were already checked when they were new.
     guardLatestUserMessage: true,
-    // Redact rather than only block, and on both sides: a blocked *output* that stays in the
-    // message array would otherwise be persisted to the session snapshot and replayed into the next
-    // turn's context. `saveLatestOn: 'message'` in sessions.ts is what makes the redacted version
-    // the one that reaches storage.
+    // Redact rather than only block, and on both sides: a blocked *output* left in the message
+    // array would be replayed into the next turn's context and recorded as what the agent said.
+    // What makes the redacted version the stored one is that `index.ts` takes the turn from the
+    // agent's own message array once the stream completes, rather than reassembling it from the
+    // stream — so whatever the guardrail rewrote there is what `recordTurn` files.
     redaction: { input: true, output: true },
     trace: 'enabled',
   }
@@ -43,7 +44,7 @@ const guardrailConfig = resolveGuardrail()
 
 const bedrockModel = new strands.BedrockModel({
   region: process.env.AWS_REGION || 'us-east-1',
-  modelId: process.env.BEDROCK_MODEL_ID || 'global.anthropic.claude-sonnet-4-6',
+  modelId: process.env.BEDROCK_MODEL_ID || 'us.anthropic.claude-sonnet-5',
   ...(guardrailConfig ? { guardrailConfig } : {}),
 })
 
@@ -58,7 +59,7 @@ const tools = createTools()
  * thing a new project has to unpick, and every extra rule competes for the model's attention with
  * the ones that matter to *your* domain. Replace "What you can do" as you add tools.
  */
-const systemPrompt = `
+export const systemPrompt = `
 You are a helpful personal assistant. You answer questions, think things through with the user, and
 use your tools when a task needs real information rather than a guess.
 

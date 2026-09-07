@@ -427,7 +427,7 @@ export function resolveAgentImagePlatform(input?: string): ecrassets.Platform | 
  * and configuration must come from one place. `agent/src/agent.ts` repeats it as a local fallback
  * that never engages deployed, since the stack always injects `BEDROCK_MODEL_ID`.
  */
-export const DEFAULT_BEDROCK_MODEL_ID = 'global.anthropic.claude-sonnet-4-6'
+export const DEFAULT_BEDROCK_MODEL_ID = 'us.anthropic.claude-sonnet-5'
 
 export function resolveBedrockModelId(input?: string): string {
   const trimmed = input?.trim()

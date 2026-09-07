@@ -7,12 +7,13 @@ export const MIN_SESSION_ID_LENGTH = 33
 export const SESSION_NAMESPACE_LENGTH = 16
 
 /**
- * Joins the namespace to the random half.
+ * Joins the namespace to the random half, at exactly `SESSION_NAMESPACE_LENGTH`.
  *
- * A hyphen, not a colon. The agent persists each conversation under this id as an S3 key prefix,
- * and the Strands session store validates it against `^[a-z0-9_-]+$` — a colon throws from inside a
- * snapshot write, after the model has already been billed for the turn. See
- * `agent/src/sessions.ts`, which restates the same rule from the other side.
+ * The position matters as much as the character: `actorIdFor` in `agent/src/memory.ts` derives the
+ * memory actor by slicing those first characters back off, so a separator anywhere else files the
+ * turn under a different actor without failing. A hyphen rather than a colon keeps the whole id
+ * inside `[a-z0-9_-]`, the class `__tests__/session.test.ts` pins — an id AgentCore rejects surfaces
+ * from inside a memory write, after the model has already been billed for the turn.
  */
 export const SESSION_SEPARATOR = '-'
 

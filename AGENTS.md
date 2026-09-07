@@ -61,13 +61,14 @@ the suite red rather than shipping quietly.
 
 | Invariant | Why | Asserted by |
 |---|---|---|
-| **No tool takes a user id.** Tools read the caller with `currentCaller()` (`agent/src/caller.ts`); the schema the model sees carries no identity | An identity the model can pass is one a prompt can talk it into changing — "list the notes for user X" is a real attack | `agent/src/__tests__/tools.test.ts` — *takes no user id as a tool parameter*, over the whole toolset |
+| **No tool takes a user id.** Tools read the caller with `currentCaller()` (`agent/src/caller.ts`); the schema the model sees carries no identity | An identity the model can pass is one a prompt can talk it into changing — "list the notes for user X" is a real attack | `agent/src/__tests__/tools.test.ts` — *takes no caller identity as a tool parameter*: every property name in every tool's schema, at any depth, checked against the spellings of "whose data is this" |
 | **The BFF is the only transport to the agent.** The runtime declares no authorizer config, so it accepts SigV4 alone, and only the chat role holds `InvokeAgentRuntime` | The identity block is plain text; it is only as trustworthy as the transport that carried it | `stacks.test.ts` — *declares no authorizer configuration on the runtime*, *grants InvokeAgentRuntime to nothing in this stack* |
 | **The browser holds no AWS credentials.** User pool only, no identity pool | A browser that can assume a role can reach past the BFF | `stacks.test.ts` — *creates no Cognito Identity Pool*, *creates no role a browser could assume through Cognito* |
 | **Privilege separation across the three Lambdas.** Chat relays model output and can do nothing else; admin holds the Cognito actions; conversations reads and deletes history | A browser-reachable function that could forge history is worse than none, because a forged transcript is believed | `stacks.test.ts` — *keeps every privileged grant off the function that relays model output* and three sibling tests |
 | **The identity wire format is a contract between two packages** that cannot import each other (`chatbot-bff/src/session-context.ts` ↔ `agent/src/caller.ts`) | Drift detaches the agent from the caller silently | `session-context.test.ts` — *emits the agreed block*; `caller.test.ts` — *parses the exact block the BFF emits* |
-| **Session ids are namespaced to the caller's `sub`** (`chatbot-bff/src/session.ts`) | A session id is a bearer token for conversation history | `session.test.ts` |
-| **The deployment profile gate** (`infra/src/config.ts`) refuses a `pilot`/`prod` synth carrying a sandbox default | Documentation is the control that fails: whoever runs the pilot is not whoever read the comment | `config.test.ts` — `describe('the deployment profile gate')` |
+| **Session ids are namespaced to the caller's `sub`** (`chatbot-bff/src/session.ts`) | A session id is a bearer token for conversation history | `session.test.ts` for the rule; `conversations-handler.test.ts` for the routes consulting it — *is answered 404 on read, and is never fetched* |
+| **The deployment profile gate** (`infra/src/config.ts`) refuses a `pilot`/`prod` synth carrying a sandbox default | Documentation is the control that fails: whoever runs the pilot is not whoever read the comment | `config.test.ts` for the rules; `app.test.ts` for the wiring — it executes `app.ts` and asserts it refuses, so dropping the call is caught too |
+| **A browser-reachable route fails closed.** No verified `sub` means no store is touched at all — not a fallback caller, not an unscoped read | The authorizer always attaches claims, so their absence means the route is misconfigured or being reached some other way | `conversations-handler.test.ts` and `admin-handler.test.ts` — every denial case also asserts the AWS client was never called |
 | **Every API method sits behind the Cognito authorizer** | A new route must not be born unauthenticated | `stacks.test.ts` — *gates every method on the API behind the Cognito authorizer*, which enumerates methods rather than listing known routes |
 
 If your domain genuinely requires changing one of these, change it deliberately and say so in the
@@ -80,6 +81,10 @@ PR — do not edit the test to make the suite pass.
   `infra/src/config.ts` to get past it. `demo` is the default and is never checked.
 - **An invariant test failing** after you added a tool or a route means the change crossed a security
   boundary, not that the test is stale. The test comments name the attack each one prevents.
+- **Except one, which is a prompt reminder rather than a boundary:** *the toolset is named in the
+  system prompt*. A tool the prompt never mentions is one the model has little reason to call — add
+  it to "What you can do" in `agent/src/agent.ts` and the test goes green. It asserts that the prompt
+  names every tool that exists, so adding tools never requires editing the test itself.
 - **`exec format error` building the agent image** on a non-arm64 machine → `npm run docker:setup-arm64`.
 
 ## Where new things go
