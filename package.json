@@ -19,6 +19,7 @@
     "lint:fix": "eslint . --fix",
     "build": "npm --prefix ./agent run build && npm --prefix ./chatbot-bff run build && npm --prefix ./chatbot-frontend run build",
     "synth": "npm --prefix ./infra run synth",
+    "nag": "npm --prefix ./infra run nag",
     "deploy": "npm --prefix ./infra run deploy",
     "deploy:no-approval": "npm --prefix ./infra run deploy:no-approval",
     "destroy": "npm --prefix ./infra run destroy",

@@ -49,7 +49,13 @@ CI runs three more jobs — `synth` (`npm run synth`, which you can also run), p
 request. If `secrets` or `sast` flags something that is not a real problem, suppress it at the line with
 the evidence beside it — `// nosemgrep: <full-rule-id>` — rather than widening an exclude or deleting
 the job. There are two such suppressions today, in `agent/src/caller.ts` and
-`chatbot-frontend/src/__tests__/qrcode.test.ts`.
+`chatbot-frontend/src/__tests__/qrcode.test.ts`. Both are listed in the `sast` summary on the run page:
+a suppression whose justification has stopped holding should be visible, not silent.
+
+`synth` also runs `npm run nag`, an `AwsSolutionsChecks` report over the synthesized stacks. It is
+**report-only and cannot fail your pull request** — see `infra/src/nag.ts` for why gating on it would
+be the wrong trade for a template. What it is for is the count: if your change moves it, the summary
+says which rule and which resource, and that is worth a sentence in the pull request either way.
 
 The whole gate is deliberately free of external configuration: no AWS credentials, no repository
 secrets, no GitHub Code Security. If a change to CI would introduce one, say so in the pull request —

@@ -18,6 +18,8 @@
     "build:dependencies": "npm --prefix ../chatbot-bff run build && npm --prefix ../chatbot-frontend run build",
     "presynth": "npm run build:dependencies",
     "synth": "dotenvx run -f .env --overload -- cdk synth",
+    "prenag": "npm run build:dependencies",
+    "nag": "dotenvx run -f .env --overload -- tsx src/nag.ts",
     "predeploy": "npm run build:dependencies",
     "deploy": "dotenvx run -f .env --overload -- cdk deploy --all --require-approval broadening",
     "predeploy:no-approval": "npm run build:dependencies",
@@ -35,6 +37,7 @@
     "@dotenvx/dotenvx": "^2.21.0",
     "@types/node": "^26.4.1",
     "aws-cdk": "^2.1138.0",
+    "cdk-nag": "^3.0.2",
     "tsx": "^4.23.12",
     "typescript": "^7.0.2",
     "vitest": "^4.1.11"

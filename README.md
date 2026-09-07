@@ -174,13 +174,16 @@ request, and the gate works.
 |---|---|---|
 | `verify` | `npm run verify` then `npm run build` | Yes — identical |
 | `audit` | `npm run audit` | Yes — identical. Needs no `node_modules` |
-| `synth` | `npm run synth` — the only check that executes the real `app.ts` | Yes — identical |
+| `synth` | `npm run synth` — the only check that executes the real `app.ts` — then `npm run nag`, an IaC policy report | Yes — identical |
 | `secrets` | TruffleHog, pinned by action SHA *and* scanner version | Yes, with Docker |
 | `sast` | Semgrep CE, `p/default`, pinned by image digest | Yes, with Docker |
 
-Two details worth knowing. **`secrets` and `sast` report through their exit codes rather than uploading
-to the Security tab**, because a code-scanning upload needs GitHub Code Security — paid on a private
-repository — and a template must not ship a gate that only works for whoever owns the original.
+Two details worth knowing. **Gating and reporting are separate concerns here.** Every job gates
+through its own exit code, so a fork on any plan gets the same red or green; reporting is layered on
+top and degrades instead of failing. `sast` and `synth` both render a table to the run's summary page
+and attach their raw report as an artifact — free everywhere — and `sast` additionally uploads to code
+scanning when the repository is public, where that is free. Only the upload can be unavailable, and
+losing it costs a nicer view of a result already reported twice.
 And **`secrets` scans a pull request's diff, not its whole history**: the full-history pass runs on the
 weekly schedule, where it is worth the time. That schedule is also what re-runs `audit` against
 advisories published since the last commit.
@@ -189,10 +192,21 @@ Dependency updates arrive as pull requests from Dependabot (`.github/dependabot.
 seven days before proposing a new version — long enough that a compromised publish is usually yanked
 first. The audit gate reports what is already vulnerable; something has to move the versions forward.
 
-Not yet covered: an IaC policy scan. `cdk-nag`'s `AwsSolutionsChecks` currently reports 51 errors
-across this app, most of them the wildcard IAM statements AWS gives no alternative for — each needs an
-evidenced suppression, and a handful are real gaps listed under *What this template leaves open*. It
-is a worthwhile addition and it is not a one-line one.
+The IaC policy scan runs **report-only**, and that is a deliberate stopping point rather than a job
+half-wired. `cdk-nag`'s `AwsSolutionsChecks` reports **44 findings in CI** — and 53 against a `.env`
+with WAF, the guardrail and observability switched on, which is why the summary states the posture it
+scanned before it states the count. Roughly a third of either number is on constructs CDK generates for
+itself — the bucket deployment behind
+`s3-deployment`, the custom-resource Lambdas behind log-group governance. Gating means writing a
+suppression for every one of them first, and a template whose forks inherit fifty pre-accepted
+exceptions has made its suppression list worthless: it stops reading as *decisions we took* and starts
+reading as *noise that came with the template*.
+
+What the report is worth with no suppression written is the delta. A pull request that takes 53 to 55
+has added two, and the summary names the rule and the resource. Some of the 53 are real and already
+tracked under *What this template leaves open* — the CloudFront hardening, S3 access logs, API request
+validation. Run it yourself with `npm run nag`; note that it reads your `.env`, so your number
+describes your posture and only the CI number is comparable across runs.
 
 There is no deploy pipeline: `deploy` runs from your machine against whatever credentials are in the
 shell. Adding one is the first thing a shared environment needs.

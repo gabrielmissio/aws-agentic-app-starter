@@ -85,6 +85,9 @@ jobs:
   # Credential-free: `CDK_DEFAULT_ACCOUNT` is unset, so the app synthesizes environment-agnostic
   # templates. `DEPLOY_PROFILE` is likewise unset, which means `demo`, which the profile gate does not
   # check — the gate's refusal path is covered by `infra/src/__tests__/app.test.ts` instead.
+  #
+  # That same absence is why the cdk-nag report below is the comparable one: it always describes
+  # `demo` with every optional control off, where a local run describes whatever your `.env` sets.
   synth:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -106,6 +109,31 @@ jobs:
       # container asset's build context at synth and builds it at publish time.
       - name: Synthesize all four stacks
         run: npm run synth
+
+      # The IaC policy scan, in the job that already paid for the install and the asset build — it
+      # needs exactly the construct tree the step above just proved synthesizes.
+      #
+      # Report-only, and `infra/src/nag.ts` explains why at length: gating would mean writing a
+      # suppression for all 44 findings this job currently reports first, a third of them on constructs
+      # CDK generates for itself, and a template whose forks inherit forty pre-accepted exceptions has
+      # turned its suppression list into noise. What is worth reading today is the count moving, which
+      # is why the summary leads with it. This step cannot fail the job — `nag.ts` reports rather than
+      # throws.
+      - name: cdk-nag
+        run: npm run nag
+
+      - name: Report
+        if: always()
+        run: jq -r -f .github/cdk-nag-summary.jq infra/cdk.out/cdk-nag.json >> "$GITHUB_STEP_SUMMARY"
+
+      # The canonical copy. A local run reads your `.env` and so scans a different posture — CI has
+      # none, which is what makes this report the one two runs can be compared across.
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cdk-nag-report
+          path: infra/cdk.out/cdk-nag.json
 
   # `npm audit` says whether a dependency is vulnerable. It says nothing about whether this repository
   # is carrying a credential.

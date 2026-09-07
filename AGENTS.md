@@ -34,9 +34,9 @@ npm run verify   # lint + typecheck + the full suite, across every package
 ```
 
 It needs no AWS credentials, no Docker and no browser, and it is exactly what CI's `verify` job
-runs. CI adds `npm run build`, `npm run synth`, TruffleHog and Semgrep CE — all runnable locally, the
-last two needing Docker. A failing invariant test is **not** a broken test — see *Failures that are not
-bugs*.
+runs. CI adds `npm run build`, `npm run synth`, `npm run nag` (an IaC policy report that cannot fail
+the build), TruffleHog and Semgrep CE — all runnable locally, the last two needing Docker. A failing
+invariant test is **not** a broken test — see *Failures that are not bugs*.
 
 ## Replace freely
 
