@@ -37,3 +37,4 @@ describe('resolveCorrelationId', () => {
     expect(resolveCorrelationId(undefined, generate)).toBe('generated')
   })
 })
+

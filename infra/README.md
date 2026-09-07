@@ -102,9 +102,10 @@ because a conditional check-and-increment is the only operation the code perform
 | `COGNITO_THREAT_PROTECTION` | `off` (default) · `audit` · `enforced`. Anything but `off` moves the pool to the billed Plus plan |
 | `WAF_ENABLED` | A web ACL on the API stage. Off in every profile — the only layer that filters *before* authentication |
 | `GUARDRAIL_ENABLED` | A Bedrock guardrail on model input and output: content filters, prompt-attack detection, PII anonymization. Off by default (billed per text unit); **required** under `pilot`/`prod` |
-| `TRACING_ENABLED` | X-Ray on the API stage and all three Lambdas. Off by default (billed per trace); **required** under `pilot`/`prod` |
-| `CONVERSATION_RETENTION_DAYS` | How long a conversation is kept. Sets `eventExpiryDuration` on the memory resource and the TTL on the index rows. **Required** under `pilot`/`prod`, with no default — the answer is yours |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | Where the agent container exports spans and token metrics. Passed through untouched; unset, the container's instruments stay silent while the Lambdas still trace |
+| `TRACING_ENABLED` | X-Ray on the API stage and all three Lambdas, **plus the ADOT OpenTelemetry layer** that instruments the AWS SDK — without it a trace map stops at Lambda and the AgentCore call shows as `UnknownRemoteService`. Off by default (billed per trace); **required** under `pilot`/`prod` |
+| `AGENT_OBSERVABILITY_ENABLED` | Spans and token/tool metrics from inside the agent container, plus its telemetry log group, masking policy and vended-log deliveries. Off by default; **required** under `pilot`/`prod`. AgentCore's own variable name, passed through unchanged |
+| `TRANSACTION_SEARCH_ENABLED` | An **acknowledgement** that CloudWatch Transaction Search is on for this account and Region — nothing here creates it. **Required** under `pilot`/`prod`, because without it spans are accepted and then silently discarded. Verify with `aws xray get-trace-segment-destination` before deploying: it must read `CloudWatchLogs` **and** `ACTIVE` — see [Troubleshooting](#troubleshooting) |
+| `CONVERSATION_RETENTION_DAYS` | How long a conversation is kept. Sets `eventExpiryDuration` on the memory resource, the TTL on the index rows, and the retention on the agent's telemetry log group, so a trace never outlives the turn it describes. **Required** under `pilot`/`prod`, with no default — the answer is yours |
 | `MEMORY_MAX_MESSAGES` | How much history is replayed into a turn, default `40`. Every turn re-sends its context, so this bounds what a long conversation costs |
 | `APP_URL` | Canonical app URL for the emails. Unset, falls back to what `frontend` published to SSM |
 | `RETAIN_DATA` | `true` (default): the user pool and frontend bucket survive `cdk destroy` |
@@ -224,6 +225,159 @@ which an invite flow cannot use). Then add
 in `auth-stack.ts`.
 
 ## Troubleshooting
+
+### The deploy fails on an X-Ray delivery destination
+
+`cdk deploy` rolls back on the agent stack with:
+
+```text
+Resource handler returned message: "X-Ray Delivery Destination is supported with CloudWatch Logs as
+a Trace Segment Destination. Please enable the CloudWatch Logs destination for your traces using the
+UpdateTraceSegmentDestination API" (Service: CloudWatchLogs, Status Code: 400)
+```
+
+The `TRACES` delivery in `agent-stack.ts` is asking X-Ray to file this agent's spans, and X-Ray only
+accepts that once the **account's** trace segment destination is CloudWatch Logs. That is not
+something this stack sets — see the note on `TRANSACTION_SEARCH_ENABLED` above for why a template
+must not reach into account-wide state.
+
+Two things make this easy to hit even when you believe Transaction Search is on:
+
+- **It is three settings, not one.** The console's *Enable Transaction Search* button applies a
+  CloudWatch Logs resource policy, the trace segment destination, and an indexing rule together. A
+  session saved in a different Region, or one that did not complete, can leave the destination on
+  `XRay` while the rest looks configured.
+- **It is applied asynchronously.** The destination reports `PENDING` for up to ~10 minutes, and a
+  deploy against `PENDING` fails with this exact message — indistinguishable from never having
+  enabled it.
+
+Check which of the two you are in:
+
+```bash
+aws xray get-trace-segment-destination --region <your region>
+```
+
+| Output | Meaning |
+|---|---|
+| `"Destination": "XRay"` | Not enabled in this Region. Run the `update` below |
+| `"Destination": "CloudWatchLogs"`, `"Status": "PENDING"` | Enabled, still propagating. Wait and retry the deploy — nothing to fix |
+| `"Destination": "CloudWatchLogs"`, `"Status": "ACTIVE"` | Ready. If the deploy still fails, check the Region matches `DEPLOY_REGION` |
+
+To set it — once per account and Region, with an identity that has X-Ray admin rights:
+
+```bash
+aws xray update-trace-segment-destination --destination CloudWatchLogs --region <your region>
+```
+
+Then wait for `ACTIVE` before re-running `cdk deploy`. Nothing needs to be rolled back or cleaned up
+first: the failed stack update leaves no partial delivery behind.
+
+### The deploy fails with "Not authorized to use the audit operation"
+
+`cdk deploy` rolls back on the agent stack with:
+
+```text
+Received response status [FAILED] from custom resource. Message returned: Not authorized to use the
+audit operation in the data protection policy
+```
+
+This reads like the account lacks a feature. It is four missing IAM actions.
+
+The data protection policy sends its audit findings to a log group. Configuring that makes CloudWatch
+Logs create a delivery and write a resource policy on the caller's behalf, and it checks the caller
+for the rights to do so — so `logs:PutDataProtectionPolicy` alone is not enough. AWS documents the
+set, and notes that a Lambda execution role performing the call needs them too:
+
+| Action | Resource |
+|---|---|
+| `logs:PutDataProtectionPolicy` | the log group |
+| `logs:CreateLogDelivery` | `*` |
+| `logs:PutResourcePolicy` | `*` |
+| `logs:DescribeResourcePolicies` | `*` |
+| `logs:DescribeLogGroups` | `*` |
+
+`governRuntimeLogGroup` grants all five to the custom resource that applies the policy. If you hit
+this after editing that function, check that the last four survived — they look like over-broad
+permissions worth trimming and they are not. The equivalent grant for the telemetry log group is
+invisible because CloudFormation applies that policy under the deployment role, not through a Lambda.
+
+See [IAM permissions required to create or work with a data protection
+policy](https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/data-protection-policy-permissions.html).
+
+### The traces exist in the logs but the trace map is empty
+
+`aws xray get-trace-summaries` and `get-service-graph` return nothing, and Transaction Search shows
+far fewer traces than the agent actually served — while a Logs Insights query over the span log
+groups finds them all.
+
+This is sampling, not loss. Transaction Search stores **100%** of spans as structured logs and
+**indexes** only a percentage of them for search and the trace map. The default is 1%:
+
+```bash
+aws xray get-indexing-rules --region <your region>
+```
+
+```json
+{ "IndexingRules": [ { "Name": "Default", "Rule": { "Probabilistic": { "DesiredSamplingPercentage": 1.0 } } } ] }
+```
+
+Raise it when you are developing or piloting, where you want to open the map for a turn you just
+made rather than for a random one in a hundred:
+
+```bash
+aws xray update-indexing-rule --name "Default" \
+  --rule '{"Probabilistic": {"DesiredSamplingPercentage": 100}}' --region <your region>
+```
+
+This is account-and-Region-wide state, like Transaction Search itself, so this stack does not set it
+— the same reasoning as `TRANSACTION_SEARCH_ENABLED`. Indexing is what Transaction Search bills on,
+so 100% is a development setting; lower it before a workload with real volume.
+
+Two related things worth knowing when the map still looks thin:
+
+- **The legacy X-Ray APIs go quiet by design.** Once the trace segment destination is CloudWatch
+  Logs, `BatchGetTraces`, `GetTraceSummaries` and `GetServiceGraph` stop being fed. Use Transaction
+  Search in the CloudWatch console, or query the span log groups directly.
+- **`lastEventTimestamp` lies.** `describe-log-streams` updates it on an eventual-consistency basis
+  and it can trail by more than an hour, so a stream that looks stalled may be receiving fine. Use
+  `filter-log-events` with a `--start-time` to tell whether spans are actually arriving.
+
+### The deploy fails on a delivery source that "already exists"
+
+`cdk deploy` rolls back on the agent stack with:
+
+```text
+Resource handler returned message: "Update to existing Delivery Source with new ResourceId is not
+allowed. Please create a new Delivery Source instead. (Service: CloudWatchLogs, Status Code: 400)"
+(HandlerErrorCode: AlreadyExists)
+```
+
+You are upgrading from a version of this template whose delivery sources named the runtime with a
+wildcard ARN (`...:runtime/*`). That wildcard matched no runtime, so `APPLICATION_LOGS` and
+`USAGE_LOGS` were never actually delivered — the fix points the source at the real runtime ARN.
+
+CloudWatch Logs treats a delivery source's `resourceArn` as immutable, but the CloudFormation schema
+declares only `Name` as create-only. CloudFormation therefore attempts an update where it should
+have replaced, and the service refuses.
+
+The current template already resolves this: the sources are named `<project>-agent-<log-type>`, and
+changing the name is what makes CloudFormation replace rather than update. If you are on that version
+and still see this error, you have an older source lingering under the previous name. List them:
+
+```bash
+aws logs describe-delivery-sources --region <your region> \
+  --query 'deliverySources[?contains(name, `<project>`)].{name:name,arn:resourceArns[0]}'
+```
+
+Any entry whose ARN ends in `runtime/*` is the stale one. It is no longer referenced by the stack,
+carries no data, and can be deleted:
+
+```bash
+aws logs delete-delivery-source --name <stale name> --region <your region>
+```
+
+Delete the delivery that references it first if the call complains it is in use. The stack itself
+needs no cleanup — a rolled-back update leaves the previous, working configuration in place.
 
 ### Model access is denied on the first message
 

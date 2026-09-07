@@ -52,3 +52,4 @@ export function logEvent(level: 'info' | 'error', event: string, fields: LogFiel
   if (level === 'error') console.error(line)
   else console.log(line)
 }
+

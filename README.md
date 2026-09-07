@@ -20,7 +20,7 @@ is the scaffolding, not someone else's product.
 | **Conversations** | Durable on AgentCore Memory: survives a restart, isolated per user by `actorId`, encrypted with the deployment's own KMS key, expired on a retention you declare |
 | **Auth** | Cognito — self sign-up or invite-only behind one variable, optional TOTP, localized emails, and admin invites from the browser |
 | **Safety** | An opt-in Bedrock guardrail: content filters, prompt-attack detection, PII anonymization. Required under `pilot` and `prod` |
-| **Evidence** | X-Ray on the API stage and every Lambda, OpenTelemetry in the agent, and a correlation id minted in the browser that reaches the stored turn |
+| **Evidence** | OpenTelemetry end to end — the ADOT layer on every Lambda and X-Ray on the API stage, GenAI-convention spans and token metrics from the agent in CloudWatch, a `traceparent` that makes all three one trace, and a correlation id minted in the browser that reaches the stored turn |
 | **Infrastructure** | Four CDK stacks, and a **deployment-profile gate** that refuses to synthesize a pilot still carrying sandbox defaults |
 | **Controls** | Retention, alarms, an account budget, stage throttling, an optional WAF — each off by default, each documented with what it bills for |
 
@@ -227,13 +227,43 @@ It is scaffolding, not a finished product. What is deliberately yours:
 * **The guardrail policy is a starting point.** The filters and PII entities in
   `infra/src/stacks/agent-stack.ts` are a defensible default, not an answer to your risk register —
   strengths, denied topics and blocked-message copy are all domain decisions.
+
+  Two things worth knowing before you rely on the PII entities, both observed in a real deployment
+  rather than reasoned about:
+
+  **PII anonymisation is not reliable on a streamed response.** With `action: 'ANONYMIZE'`, Bedrock
+  replaces a match with a marker like `{EMAIL}`. In synchronous mode — the default — the guardrail
+  *"buffers and applies the configured policies to one or more response chunks"*, so it evaluates
+  windows rather than the finished answer, and a value can be replaced in one window and survive in
+  the next. A real turn produced `Conta logada: {EMAIL}user@example.com.` — the marker and the
+  original, side by side. Asynchronous mode is not an escape: AWS states plainly that Guardrails
+  *"doesn't support the masking of sensitive information with asynchronous mode."* Nor does the SDK
+  compensate: Strands applies its own `redaction` only when the stop reason is `guardrail_intervened`,
+  which `ANONYMIZE` never produces because it masks instead of blocking. Treat PII anonymisation as
+  defence in depth, never as the control that keeps a value out of a response.
+
+  **`EMAIL` and `NAME` also fire on the signed-in user's own identity.** `get_signed_in_user` exists
+  to answer "who am I" to someone already authenticated, so anonymising there hides a caller's data
+  from the caller. The guardrail cannot tell a third party's PII from the requester's own. If your
+  agent is meant to state the user's identity back to them, drop those two entities and let
+  authentication and session scope carry that boundary — the structural identifiers (card, SSN,
+  keys) stay, because no legitimate turn echoes those.
+
+  What still protects telemetry either way is layered and does not depend on the guardrail:
+  `agent/src/span-redaction.ts` redacts tool arguments and results at the source, and the CloudWatch
+  data protection policy masks on write in both log groups.
 * **The agent runtime has no VPC.** `networkMode: 'PUBLIC'`, so a tool that reaches a backend does so
   over the internet with IAM as the only boundary. The current toolset makes no outbound calls; the
   day one does, that decision needs revisiting.
-* **The container's traces need a collector.** X-Ray covers the API stage and the Lambdas from
-  `TRACING_ENABLED` alone, but the agent exports over OTLP and only when
-  `OTEL_EXPORTER_OTLP_ENDPOINT` points somewhere — where that collector lives is a deployment's
-  decision.
+* **Transaction Search is a prerequisite this template will not turn on for you.** It is
+  account-and-Region-wide state other workloads depend on, so a `cdk destroy` here must not be able
+  to switch off their telemetry. `TRANSACTION_SEARCH_ENABLED` is an acknowledgement that you enabled
+  it (`aws xray update-trace-segment-destination --destination CloudWatchLogs`), gated under
+  `pilot`/`prod` because without it spans are accepted and then silently discarded — the deployment
+  looks healthy and the traces simply never appear. Verify with `aws xray
+  get-trace-segment-destination` before deploying — it must read **both** `CloudWatchLogs` **and**
+  `ACTIVE`. If the deploy fails on a delivery destination, see
+  [infra/README.md](infra/README.md#troubleshooting).
 * **There is no CD pipeline.** Deploys run from a developer's machine with ambient credentials, and
   CI never runs `cdk synth` — constructing `AgentStack` builds the agent image, so a synth in CI
   would need Docker. The gate itself is covered without one: `infra/src/__tests__/app.test.ts`

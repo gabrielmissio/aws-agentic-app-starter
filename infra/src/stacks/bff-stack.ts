@@ -39,11 +39,42 @@ export interface BffStackProps extends cdk.StackProps {
   memoryArn: string
   /** TTL on the conversation index. Must match the memory resource's own expiry. */
   conversationRetentionDays: number
+  /** The model the agent invokes — dimensions the Bedrock throttle alarm and the dashboard. */
+  modelId: string
+  /** The namespace the agent's EMF metrics land in, when observability is on. Dashboard only. */
+  agentMetricNamespace?: string
   /** Whether X-Ray traces the functions and the stage. Required under `pilot`/`prod`. */
   tracingEnabled?: boolean
   /** Keeps the conversation index across a stack replacement, as the user pool does. */
   retainData?: boolean
 }
+
+/**
+ * The AWS account publishing the AWS Lambda Layer for OpenTelemetry. Identical in every Region.
+ *
+ * Note there are two ADOT layer families and this is the current one. The older `aws-otel-nodejs-*`
+ * layers (account 901920570463) bundle an ADOT Collector inside the function, and AWS's own guidance
+ * is that "unless you want to export the telemetry data to a non CloudWatch endpoint, [that]
+ * approach is not recommended" — we export to CloudWatch. It would also contradict the agent, where
+ * `otlp-sigv4.ts` exists precisely because the ADOT Collector is not supported for agent
+ * observability. The tell between the two is the wrapper: `/opt/otel-handler` is the legacy layer,
+ * `/opt/otel-instrument` is this one.
+ */
+const ADOT_LAYER_ACCOUNT = '615299751070'
+
+/**
+ * The layer version, pinned.
+ *
+ * A template that floats to "latest" changes what a fork deploys without the fork changing
+ * anything. This will go stale — the current value for a Region is
+ *
+ *   aws lambda list-layer-versions --region <region> \
+ *     --layer-name arn:aws:lambda:<region>:615299751070:layer:AWSOpenTelemetryDistroJs \
+ *     --query 'LayerVersions[0].Version'
+ *
+ * and this constant is the only place it appears.
+ */
+const ADOT_LAYER_VERSION = '15'
 
 export class BffStack extends cdk.Stack {
   /** The /chat endpoint URL — consumed by FrontendStack for env-var injection */
@@ -66,6 +97,8 @@ export class BffStack extends cdk.Stack {
       memoryId,
       memoryArn,
       conversationRetentionDays,
+      modelId,
+      agentMetricNamespace,
       tracingEnabled = false,
       retainData = true,
     } = props
@@ -77,6 +110,54 @@ export class BffStack extends cdk.Stack {
      * question actually gets asked.
      */
     const tracing = tracingEnabled ? lambda.Tracing.ACTIVE : lambda.Tracing.DISABLED
+
+    /**
+     * Graviton, for all three functions.
+     *
+     * ~20% cheaper per GB-second than x86 at equal or better performance, and AWS's recommended
+     * default for new workloads. Safe here because the deployed artifact is pure JavaScript: tsup
+     * bundles every dependency in and the CDK asset excludes `node_modules`, so nothing
+     * architecture-specific ships. A function that later needs a native module has to revisit this.
+     */
+    const architecture = lambda.Architecture.ARM_64
+
+    /**
+     * OpenTelemetry auto-instrumentation for the three functions, from the AWS-managed ADOT layer.
+     *
+     * **Why a layer and not the X-Ray SDK.** The X-Ray SDKs entered maintenance mode in February
+     * 2026 — security patches only — and AWS names OpenTelemetry as the instrumentation path. More
+     * than that: the agent container is already pure OTel, so reaching for the X-Ray SDK here would
+     * make one template bilingual in tracing, with two context models a fork would inherit and have
+     * to unpick. See the invariant in AGENTS.md.
+     *
+     * What it buys, concretely: `tracing: ACTIVE` alone traces the *invocation*, so a trace map
+     * shows API Gateway and Lambda and then stops — DynamoDB and Cognito are invisible and the
+     * AgentCore call renders as `UnknownRemoteService`, because nothing writes the attributes that
+     * name a downstream. The layer instruments the AWS SDK and supplies them.
+     *
+     * Gated on `tracingEnabled` alongside the active-tracing setting it belongs to: a layer
+     * exporting spans while X-Ray is off would bill for telemetry the deployment declared it did
+     * not want.
+     */
+    const adotLayer = tracingEnabled
+      ? lambda.LayerVersion.fromLayerVersionArn(
+          this,
+          'AdotLayer',
+          // This layer family is architecture-neutral — one ARN serves x86_64 and arm64.
+          `arn:${this.partition}:lambda:${this.region}:${ADOT_LAYER_ACCOUNT}:layer:AWSOpenTelemetryDistroJs:${ADOT_LAYER_VERSION}`,
+        )
+      : undefined
+
+    /** Applied to every function, so a new one cannot be born untraced by omission. */
+    const otelEnvironment: Record<string, string> = adotLayer
+      ? {
+          AWS_LAMBDA_EXEC_WRAPPER: '/opt/otel-instrument',
+          // Tracing without Application Signals. The layer supports both, but Application Signals
+          // is separately billed and its value here is the SLO layer this template deliberately
+          // defers (docs/assessment.md) — so it stays off until someone chooses a target.
+          OTEL_AWS_APPLICATION_SIGNALS_ENABLED: 'false',
+        }
+      : {}
 
     // ── Per-caller rate limit table ─────────────────────────────────────
     // One item per (caller, window); see chatbot-bff/src/rate-limit.ts. Disposable counters, not
@@ -124,9 +205,21 @@ export class BffStack extends cdk.Stack {
       runtime: lambda.Runtime.NODEJS_22_X,
       timeout: cdk.Duration.seconds(60),
       memorySize: 512,
-      architecture: lambda.Architecture.X86_64,
+      architecture,
       tracing,
+      ...(adotLayer ? { layers: [adotLayer] } : {}),
+      // JSON rather than the default text. `logEvent` (chatbot-bff/src/correlation.ts) already emits
+      // one JSON object per line, but Lambda's own START/END/REPORT lines and any stray `console`
+      // call stayed unstructured — so a Logs Insights query filtering on a correlation id silently
+      // skipped them. `loggingFormat` also makes the level a queryable field rather than a prefix.
+      loggingFormat: lambda.LoggingFormat.JSON,
+      applicationLogLevelV2: lambda.ApplicationLogLevel.INFO,
+      systemLogLevelV2: lambda.SystemLogLevel.WARN,
       environment: {
+        ...otelEnvironment,
+        // Names this function's node in the trace map. Without it the map falls back to a generic
+        // label and two of the three functions become indistinguishable.
+        OTEL_SERVICE_NAME: `${projectName}-bff`,
         ALLOWED_ORIGIN: allowedOrigin,
         AGENT_RUNTIME_ARN: agentRuntimeArn,
         COGNITO_USER_POOL_ID: userPool.userPoolId,
@@ -281,9 +374,19 @@ export class BffStack extends cdk.Stack {
       // billing after the gateway has returned 504. The chat function streams, so it is exempt.
       timeout: cdk.Duration.seconds(29),
       memorySize: 256,
-      architecture: lambda.Architecture.X86_64,
+      architecture,
       tracing,
+      ...(adotLayer ? { layers: [adotLayer] } : {}),
+      // JSON rather than the default text. `logEvent` (chatbot-bff/src/correlation.ts) already emits
+      // one JSON object per line, but Lambda's own START/END/REPORT lines and any stray `console`
+      // call stayed unstructured — so a Logs Insights query filtering on a correlation id silently
+      // skipped them. `loggingFormat` also makes the level a queryable field rather than a prefix.
+      loggingFormat: lambda.LoggingFormat.JSON,
+      applicationLogLevelV2: lambda.ApplicationLogLevel.INFO,
+      systemLogLevelV2: lambda.SystemLogLevel.WARN,
       environment: {
+        ...otelEnvironment,
+        OTEL_SERVICE_NAME: `${projectName}-bff-admin`,
         ALLOWED_ORIGIN: allowedOrigin,
         COGNITO_USER_POOL_ID: userPool.userPoolId,
         ADMIN_GROUP_NAME,
@@ -337,9 +440,19 @@ export class BffStack extends cdk.Stack {
       runtime: lambda.Runtime.NODEJS_22_X,
       timeout: cdk.Duration.seconds(29),
       memorySize: 256,
-      architecture: lambda.Architecture.X86_64,
+      architecture,
       tracing,
+      ...(adotLayer ? { layers: [adotLayer] } : {}),
+      // JSON rather than the default text. `logEvent` (chatbot-bff/src/correlation.ts) already emits
+      // one JSON object per line, but Lambda's own START/END/REPORT lines and any stray `console`
+      // call stayed unstructured — so a Logs Insights query filtering on a correlation id silently
+      // skipped them. `loggingFormat` also makes the level a queryable field rather than a prefix.
+      loggingFormat: lambda.LoggingFormat.JSON,
+      applicationLogLevelV2: lambda.ApplicationLogLevel.INFO,
+      systemLogLevelV2: lambda.SystemLogLevel.WARN,
       environment: {
+        ...otelEnvironment,
+        OTEL_SERVICE_NAME: `${projectName}-bff-conversations`,
         ALLOWED_ORIGIN: allowedOrigin,
         AGENTCORE_MEMORY_ID: memoryId,
         CONVERSATION_TABLE_NAME: conversationTable.tableName,
@@ -438,11 +551,71 @@ export class BffStack extends cdk.Stack {
         evaluationPeriods: 1,
         treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
       }),
+      // Every alarm above fires on an error. These three fire on the failures that return 200:
+      // a conversation nobody waits for, a runtime refusing work it never reports as broken, and a
+      // model call the service rejects. Each was in the assessment's "still absent" list.
+      new cloudwatch.Alarm(this, 'ChatFunctionLatency', {
+        alarmName: `${projectName}-chat-latency`,
+        alarmDescription:
+          'The chat Lambda is slow. Nothing is erroring — users are abandoning the turn instead.',
+        // p95, not average: an average hides the tail, and the tail is what a user experiences as
+        // "it is broken". The threshold sits below the 60s function timeout so it warns rather than
+        // reporting a failure that already happened.
+        metric: fn.metricDuration({ period: cdk.Duration.minutes(5), statistic: 'p95' }),
+        threshold: cdk.Duration.seconds(45).toMilliseconds(),
+        evaluationPeriods: 2,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      }),
+      new cloudwatch.Alarm(this, 'AgentRuntimeThrottles', {
+        alarmName: `${projectName}-agent-throttles`,
+        alarmDescription:
+          'AgentCore is throttling invocations — the deployment is at a service quota, not broken.',
+        metric: agentRuntimeMetric('Throttles', projectName),
+        threshold: 1,
+        evaluationPeriods: 1,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      }),
+      new cloudwatch.Alarm(this, 'AgentRuntimeSystemErrors', {
+        alarmName: `${projectName}-agent-system-errors`,
+        alarmDescription:
+          'AgentCore is failing server-side. The chat Lambda may still be answering 200 with a failed turn.',
+        metric: agentRuntimeMetric('SystemErrors', projectName),
+        threshold: 1,
+        evaluationPeriods: 1,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      }),
+      new cloudwatch.Alarm(this, 'BedrockThrottles', {
+        alarmName: `${projectName}-bedrock-throttles`,
+        alarmDescription:
+          'Bedrock is throttling model calls — turns are failing for capacity, not for correctness.',
+        metric: new cloudwatch.Metric({
+          namespace: 'AWS/Bedrock',
+          metricName: 'InvocationThrottles',
+          dimensionsMap: { ModelId: modelId },
+          period: cdk.Duration.minutes(5),
+          statistic: 'Sum',
+        }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      }),
     ]
 
     for (const alarm of alarms) {
       alarm.addAlarmAction(new cwactions.SnsAction(alarmTopic))
     }
+
+    // ── Operations: one page to answer "is it healthy, and what is it costing" ──
+    // The alarms above say something is wrong. This says what, and it is the artefact an operator
+    // opens first — which is why the rows are ordered the way an incident actually unfolds: what the
+    // user experienced, then which layer produced it, then what the model was doing.
+    createDashboard(this, {
+      projectName,
+      api,
+      chatFunction: fn,
+      modelId,
+      agentMetricNamespace,
+    })
 
     // A budget alerts; it cannot stop spend. It also measures the WHOLE ACCOUNT, not this project,
     // despite the name: there is no `costFilters` below.
@@ -508,7 +681,9 @@ function attachWebAcl(scope: Construct, projectName: string, api: apigateway.Res
 
   const acl = new wafv2.CfnWebACL(scope, 'ApiWebAcl', {
     name: `${projectName}-api-acl`,
-    description: `Edge protection for ${projectName}'s API stage.`,
+    // No apostrophe: CloudFormation validates this against a pattern that permits only
+    // alphanumerics and `+=:#@/-,.` plus whitespace, so a possessive fails template validation.
+    description: `Edge protection for the ${projectName} API stage.`,
     // REGIONAL, not CLOUDFRONT: the ACL is associated with an API Gateway stage. A CloudFront-scoped
     // ACL must live in us-east-1 and would protect the SPA distribution, which is a different door.
     scope: 'REGIONAL',
@@ -549,4 +724,161 @@ function attachWebAcl(scope: Construct, projectName: string, api: apigateway.Res
   })
   // CloudFormation cannot infer the ordering from `stageArn`, which is a token either way.
   association.node.addDependency(api.deploymentStage)
+}
+
+/**
+ * One AgentCore runtime metric.
+ *
+ * AgentCore dimensions these by the runtime's *name*, not its ARN — and `AgentStack` builds that
+ * name from the project name with hyphens replaced, so the same transformation has to happen here.
+ * Written as a helper rather than inlined four times because getting that transformation wrong
+ * produces an alarm that never fires, which looks exactly like an alarm that never needed to.
+ */
+function agentRuntimeMetric(metricName: string, projectName: string): cloudwatch.Metric {
+  return new cloudwatch.Metric({
+    namespace: 'AWS/Bedrock-AgentCore',
+    metricName,
+    dimensionsMap: { AgentRuntimeName: projectName.replaceAll('-', '_') },
+    period: cdk.Duration.minutes(5),
+    statistic: 'Sum',
+  })
+}
+
+/**
+ * The operational dashboard.
+ *
+ * Deliberately not a widget per metric: a page with forty graphs is one nobody reads under pressure.
+ * Three rows, each answering one question, in the order an incident is actually diagnosed.
+ *
+ * The agent row is present only when `agentObservabilityEnabled` put those metrics there. A widget
+ * charting a namespace nothing writes to renders as a flat line at zero, which reads as "the agent
+ * is idle" rather than "this was never switched on" — the more dangerous of the two.
+ */
+function createDashboard(
+  scope: Construct,
+  options: {
+    projectName: string
+    api: apigateway.RestApi
+    chatFunction: lambda.Function
+    modelId: string
+    agentMetricNamespace?: string
+  },
+): cloudwatch.Dashboard {
+  const { projectName, api, chatFunction, modelId, agentMetricNamespace } = options
+  const period = cdk.Duration.minutes(5)
+
+  const agentMetric = (metricName: string, statistic: string) =>
+    new cloudwatch.Metric({
+      namespace: agentMetricNamespace ?? '',
+      metricName,
+      dimensionsMap: { ServiceName: `${projectName}-agent` },
+      period,
+      statistic,
+    })
+
+  const dashboard = new cloudwatch.Dashboard(scope, 'OperationsDashboard', {
+    dashboardName: `${projectName}-operations`,
+    defaultInterval: cdk.Duration.hours(3),
+  })
+
+  // Row 1 — what the user got. Latency is p50 beside p95 on purpose: the gap between them is what
+  // separates "everyone is waiting" from "a few turns are stuck", and those have different causes.
+  dashboard.addWidgets(
+    new cloudwatch.GraphWidget({
+      title: 'Turns — requests and failures',
+      width: 12,
+      left: [api.metricCount({ period }), api.metricServerError({ period })],
+      right: [chatFunction.metricErrors({ period })],
+    }),
+    new cloudwatch.GraphWidget({
+      title: 'Turn latency (p50 / p95)',
+      width: 12,
+      left: [
+        chatFunction.metricDuration({ period, statistic: 'p50', label: 'p50' }),
+        chatFunction.metricDuration({ period, statistic: 'p95', label: 'p95' }),
+      ],
+    }),
+  )
+
+  // Row 2 — which layer produced it. AgentCore's throttles and errors are the ones the chat Lambda
+  // can answer 200 over, so a turn can fail here with nothing above it looking wrong.
+  dashboard.addWidgets(
+    new cloudwatch.GraphWidget({
+      title: 'AgentCore runtime',
+      width: 12,
+      left: [
+        agentRuntimeMetric('Invocations', projectName),
+        agentRuntimeMetric('Throttles', projectName),
+        agentRuntimeMetric('SystemErrors', projectName),
+        agentRuntimeMetric('UserErrors', projectName),
+      ],
+      right: [agentRuntimeMetric('SessionCount', projectName)],
+    }),
+    new cloudwatch.GraphWidget({
+      title: 'Bedrock model',
+      width: 12,
+      left: [
+        new cloudwatch.Metric({
+          namespace: 'AWS/Bedrock',
+          metricName: 'InvocationThrottles',
+          dimensionsMap: { ModelId: modelId },
+          period,
+          statistic: 'Sum',
+        }),
+        new cloudwatch.Metric({
+          namespace: 'AWS/Bedrock',
+          metricName: 'InvocationServerErrors',
+          dimensionsMap: { ModelId: modelId },
+          period,
+          statistic: 'Sum',
+        }),
+      ],
+      right: [
+        new cloudwatch.Metric({
+          namespace: 'AWS/Bedrock',
+          metricName: 'InvocationLatency',
+          dimensionsMap: { ModelId: modelId },
+          period,
+          statistic: 'p95',
+        }),
+      ],
+    }),
+  )
+
+  if (!agentMetricNamespace) return dashboard
+
+  // Row 3 — what the model was doing. These come from instruments Strands already emitted and
+  // nothing collected: the assessment lists them as absent business metrics, and they were only
+  // ever unexported. Tokens are the cost line; time-to-first-token is what the user calls "slow"
+  // even when the total is fine; tool errors are the failure that reaches the answer as a
+  // confident wrong one rather than as an error.
+  dashboard.addWidgets(
+    new cloudwatch.GraphWidget({
+      title: 'Tokens',
+      width: 8,
+      left: [
+        agentMetric('GenAiAgentTokensInput', 'Sum'),
+        agentMetric('GenAiAgentTokensOutput', 'Sum'),
+      ],
+    }),
+    new cloudwatch.GraphWidget({
+      title: 'Time to first token / model latency',
+      width: 8,
+      left: [
+        agentMetric('GenAiServerTimeToFirstToken', 'Average'),
+        agentMetric('GenAiAgentModelLatency', 'Average'),
+      ],
+    }),
+    new cloudwatch.GraphWidget({
+      title: 'Tool calls and errors',
+      width: 8,
+      left: [
+        agentMetric('GenAiAgentToolCallCount', 'Sum'),
+        agentMetric('GenAiAgentToolErrorCount', 'Sum'),
+      ],
+      right: [agentMetric('GenAiAgentToolDuration', 'Average')],
+    }),
+  )
+
+  return dashboard
 }

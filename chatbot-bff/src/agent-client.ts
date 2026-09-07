@@ -55,8 +55,6 @@ export interface InvokeAgentInput {
   agentRuntimeArn: string
   /** Ties this invocation to the browser request and the BFF log lines that describe it. */
   correlationId?: string
-  /** The X-Ray root from the Lambda's own segment, when active tracing is on. */
-  traceId?: string
 }
 
 export async function invokeAgentStream(input: InvokeAgentInput): Promise<AsyncIterable<Uint8Array>> {
@@ -64,11 +62,19 @@ export async function invokeAgentStream(input: InvokeAgentInput): Promise<AsyncI
     runtimeSessionId: input.sessionId,
     agentRuntimeArn: input.agentRuntimeArn,
     qualifier: 'DEFAULT',
-    // AgentCore carries these into the runtime's telemetry context, which is what makes a container
-    // span joinable to the Lambda invocation that caused it. `baggage` is the W3C field for
-    // application-defined context, so our own id travels there rather than being squeezed into a
-    // trace id the platform assigns meaning to.
-    ...(input.traceId ? { traceId: input.traceId } : {}),
+    // Only `baggage`, and deliberately not `traceId` or `traceParent`.
+    //
+    // Those two map to the `X-Amzn-Trace-Id` and `traceparent` headers, and the SDK includes them in
+    // the SigV4 signature. The OpenTelemetry AWS SDK instrumentation then injects its own values for
+    // the same headers *after* signing, so the request arrives with a header that differs from the
+    // one signed and AgentCore rejects it: "The request signature we calculated does not match the
+    // signature you provided." SigV4 tolerates *extra* headers; it does not tolerate a signed one
+    // being rewritten. Propagating trace context is the instrumentation's job now — it does it
+    // better than deriving it by hand, because it attaches to the active span rather than the root.
+    //
+    // `baggage` stays because nothing else sets it: the instrumentation injects a baggage header
+    // only when the OTel baggage is non-empty, and ours never is. It is also what carries the
+    // correlation id when tracing is off entirely.
     ...(input.correlationId ? { baggage: `correlationId=${input.correlationId}` } : {}),
     payload: new TextEncoder().encode(input.message),
   })

@@ -198,6 +198,8 @@ describe('the deployment profile gate', () => {
     retainData: true,
     guardrailEnabled: true,
     tracingEnabled: true,
+    agentObservabilityEnabled: true,
+    transactionSearchEnabled: true,
     conversationRetentionDays: 30,
   })
 
@@ -233,6 +235,8 @@ describe('the deployment profile gate', () => {
     ['RETAIN_DATA', { retainData: false }],
     ['GUARDRAIL_ENABLED', { guardrailEnabled: false }],
     ['TRACING_ENABLED', { tracingEnabled: false }],
+    ['AGENT_OBSERVABILITY_ENABLED', { agentObservabilityEnabled: false }],
+    ['TRANSACTION_SEARCH_ENABLED', { transactionSearchEnabled: false }],
     ['CONVERSATION_RETENTION_DAYS', { conversationRetentionDays: undefined }],
   ])('refuses a pilot still carrying the sandbox %s', (variable, override) => {
     expect(() => assertDeploymentPosture({ ...pilot(), ...override })).toThrow(variable)
@@ -272,6 +276,8 @@ describe('the deployment profile gate', () => {
           ...pilot(),
           guardrailEnabled: false,
           tracingEnabled: false,
+          agentObservabilityEnabled: false,
+          transactionSearchEnabled: false,
           conversationRetentionDays: undefined,
         })
         return undefined

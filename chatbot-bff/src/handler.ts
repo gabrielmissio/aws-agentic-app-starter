@@ -27,15 +27,6 @@ function writeSseEvent(responseStream: Writable, event: string, data: unknown) {
 }
 
 /**
- * The X-Ray root for this invocation, when active tracing is on. Read per request, not once at cold
- * start: Lambda rewrites this variable on every invocation, so a cached value would staple every
- * turn on a warm container to the trace of the first one.
- */
-function currentTraceId(): string | undefined {
-  return process.env._X_AMZN_TRACE_ID?.split(';')[0]?.replace('Root=', '') || undefined
-}
-
-/**
  * Names the conversation and bumps its recency, so it appears in the user's sidebar.
  *
  * Never fatal. The agent has already been given the turn by the time this matters, and a failed
@@ -198,7 +189,6 @@ export const handler = awslambda.streamifyResponse(
         sessionId,
         agentRuntimeArn: AGENT_RUNTIME_ARN,
         correlationId,
-        ...(currentTraceId() ? { traceId: currentTraceId() as string } : {}),
       })
 
       const decoder = new TextDecoder()

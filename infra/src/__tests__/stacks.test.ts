@@ -17,7 +17,12 @@ import { describe, expect, it } from 'vitest'
 import * as cdk from 'aws-cdk-lib'
 import * as kms from 'aws-cdk-lib/aws-kms'
 import { Match, Template } from 'aws-cdk-lib/assertions'
-import { bedrockModelResources } from '../stacks/agent-stack.js'
+import {
+  bedrockModelResources,
+  createObservability,
+  createTelemetryDeliveries,
+  governRuntimeLogGroup,
+} from '../stacks/agent-stack.js'
 import { AuthStack } from '../stacks/auth-stack.js'
 import { BffStack } from '../stacks/bff-stack.js'
 import { FrontendStack } from '../stacks/frontend-stack.js'
@@ -42,6 +47,7 @@ function upstreamProps(scope: Construct) {
     memoryArn: FAKE_MEMORY_ARN,
     encryptionKey: kms.Key.fromKeyArn(scope, 'TestDataKey', FAKE_KEY_ARN),
     conversationRetentionDays: 30,
+    modelId: 'us.anthropic.claude-sonnet-5',
   }
 }
 
@@ -858,5 +864,511 @@ describe('the agent may invoke one model, not every model', () => {
     expect(source).not.toContain("resource: 'repository', resourceName: '*'")
     const describeBlock = source.slice(source.indexOf("sid: 'DescribeLogGroups'"))
     expect(describeBlock.slice(0, 600)).toContain('/aws/bedrock-agentcore/runtimes/*')
+  })
+})
+
+/**
+ * `AgentStack` itself cannot be constructed here — see the note at the top of this file — so the
+ * observability wiring is synthesized on its own, into a bare stack, the same way
+ * `bedrockModelResources` is exercised as a pure function.
+ */
+describe('AgentStack — agent telemetry', () => {
+  const RUNTIME_ARN = 'arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/test-aBcDeF1234'
+
+  function synthObservability(retentionDays = 30) {
+    const app = new cdk.App()
+    const stack = new cdk.Stack(app, 'TestTelemetry', { env })
+    const key = new kms.Key(stack, 'Key')
+
+    const result = createObservability(stack, {
+      projectName: 'test',
+      encryptionKey: key,
+      retentionDays,
+    })
+
+    // A concrete runtime ARN, never a wildcard — see the regression test below.
+    createTelemetryDeliveries(stack, {
+      projectName: 'test',
+      logGroup: result.logGroup,
+      runtimeArn: RUNTIME_ARN,
+    })
+
+    return { result, template: Template.fromStack(stack) }
+  }
+
+  /**
+   * The destination half of the content policy. Origin-side redaction covers what the Bedrock
+   * guardrail cannot reach (tool arguments and results); this covers the prompt and completion that
+   * deliberately survive it, plus AgentCore's own `request_payload`, which is captured at HTTP
+   * ingress where no code of ours could have masked it.
+   */
+  it('masks personal and credential data in the telemetry log group', () => {
+    const { template } = synthObservability()
+
+    // Two groups now: the telemetry group and the findings group its audit statement reports into.
+    const telemetry = Object.values(template.findResources('AWS::Logs::LogGroup')).find((group) =>
+      String((group.Properties as { LogGroupName?: string }).LogGroupName).endsWith('/test'),
+    )
+    const policy = JSON.stringify(telemetry?.Properties)
+
+    for (const identifier of ['EmailAddress', 'CreditCardNumber', 'AwsSecretKey', 'CpfCode-BR']) {
+      expect(policy).toContain(identifier)
+    }
+    // `Name` is deliberately absent — it matched prose. See the note on MASKED_IDENTIFIERS.
+    expect(policy).not.toContain('data-identifier/Name')
+  })
+
+  /**
+   * `RETAIN` here is a trap, not a safeguard: it applies to the rollback of the update that created
+   * the group, so a deploy failing on any later resource orphans it and the next attempt dies with
+   * "already exists" before doing anything. It cost one real deploy to find. Nothing is protected by
+   * retaining it — the conversation itself lives in AgentCore Memory, which *is* retained.
+   */
+  it('lets the telemetry log group be destroyed with the stack', () => {
+    const { template } = synthObservability()
+
+    const groups = Object.values(template.findResources('AWS::Logs::LogGroup'))
+    // The telemetry group and the masking-findings group; neither may outlive the stack.
+    expect(groups).toHaveLength(2)
+    expect((groups[0] as { DeletionPolicy?: string }).DeletionPolicy).toBe('Delete')
+  })
+
+  /**
+   * A log group whose retention outlived the conversation would be a second copy of the turn under a
+   * longer retention — quietly reopening the deletion promise the memory resource makes.
+   */
+  it('never keeps telemetry longer than the conversation it describes', () => {
+    for (const days of [1, 30, 90, 365]) {
+      const { template } = synthObservability(days)
+      template.hasResourceProperties('AWS::Logs::LogGroup', { RetentionInDays: days })
+    }
+  })
+
+  /** A retention CloudWatch does not offer rounds up, never down. */
+  it('rounds an unsupported retention up to the next supported one', () => {
+    const { template } = synthObservability(45)
+
+    template.hasResourceProperties('AWS::Logs::LogGroup', { RetentionInDays: 60 })
+  })
+
+  /**
+   * Without all three deliveries the corresponding panes of the GenAI Observability console are
+   * blank — and a blank pane reads as "the agent did nothing", not as "nothing was delivered".
+   */
+  it('delivers application logs, usage logs and traces', () => {
+    const { template } = synthObservability()
+
+    template.resourceCountIs('AWS::Logs::DeliverySource', 3)
+    template.resourceCountIs('AWS::Logs::Delivery', 3)
+    for (const logType of ['APPLICATION_LOGS', 'USAGE_LOGS', 'TRACES']) {
+      template.hasResourceProperties('AWS::Logs::DeliverySource', { LogType: logType })
+    }
+  })
+
+  /**
+   * The ARN the source is registered against, asserted because a wildcard here is invisible.
+   *
+   * This was built as `...:runtime/*` — an ARN assembled before the runtime existed, because the log
+   * group and the deliveries were created by one function that ran too early to know the runtime's
+   * identity. CloudFormation accepts that string, the console lists three active deliveries, and
+   * nothing is ever delivered: a wildcard matches no runtime. The failure has no error and no empty
+   * pane to notice, only logs that quietly stay in AgentCore's default log group, outside every
+   * control this stack applies. Hence a test on the shape of the ARN rather than on its presence.
+   */
+  /**
+   * The name, pinned because it is load-bearing in a way names usually are not.
+   *
+   * `resourceArn` is immutable in the CloudWatch Logs API but is not declared create-only in the
+   * CloudFormation schema, where `Name` is the only create-only property. A changed ARN is therefore
+   * attempted as an update and refused — "Update to existing Delivery Source with new ResourceId is
+   * not allowed" — which is exactly what the wildcard fix hit on its first deploy. The name is the
+   * only lever that forces a replacement, so reverting it would strand every deployment that ever
+   * created these sources against a different ARN.
+   */
+  it('names the delivery source after the agent, which is what makes the ARN fix deployable', () => {
+    const { template } = synthObservability()
+
+    for (const source of Object.values(template.findResources('AWS::Logs::DeliverySource'))) {
+      const name = (source.Properties as { Name?: string }).Name ?? ''
+      expect(name).toMatch(/^test-agent-/)
+      expect(name.length).toBeLessThanOrEqual(60)
+    }
+  })
+
+  it('registers the delivery source against the runtime, not a wildcard', () => {
+    const { template } = synthObservability()
+
+    const sources = Object.values(template.findResources('AWS::Logs::DeliverySource'))
+    expect(sources).toHaveLength(3)
+    for (const source of sources) {
+      const arn = (source.Properties as { ResourceArn?: string }).ResourceArn
+      expect(arn).toBe(RUNTIME_ARN)
+      expect(arn).not.toContain('*')
+    }
+  })
+
+  /**
+   * X-Ray is the destination for spans, not a log group. Naming a resource ARN alongside it is what
+   * makes CloudFormation reject the delivery.
+   */
+  it('sends traces to X-Ray and the log types to the log group', () => {
+    const { template } = synthObservability()
+
+    const destinations = Object.values(template.findResources('AWS::Logs::DeliveryDestination'))
+    const xray = destinations.filter(
+      (d) => (d.Properties as { DeliveryDestinationType?: string }).DeliveryDestinationType === 'XRAY',
+    )
+
+    expect(xray).toHaveLength(1)
+    expect((xray[0]?.Properties as { DestinationResourceArn?: string }).DestinationResourceArn).toBeUndefined()
+  })
+
+  /**
+   * X-Ray writes spans into the log group on the agent's behalf, so the service needs the grant.
+   * Without it the endpoint accepts the batch and the spans never appear — the silent failure this
+   * wiring exists to avoid.
+   */
+  it('lets X-Ray deliver spans into the log group', () => {
+    const { template } = synthObservability()
+
+    const policy = JSON.stringify(
+      Object.values(template.findResources('AWS::Logs::ResourcePolicy'))[0]?.Properties,
+    )
+    expect(policy).toContain('xray.amazonaws.com')
+    expect(policy).toContain('logs:PutLogEvents')
+    // `CreateLogStream` too, which the documentation omits: the `spans` stream does not exist until
+    // the first export and X-Ray is what creates it. Without this the endpoint answers 400 and every
+    // span is lost — which is exactly what the first deployment did.
+    expect(policy).toContain('logs:CreateLogStream')
+    // Scoped to this account, so the statement cannot be used from another one.
+    expect(policy).toContain('aws:SourceAccount')
+    // `logGroupArn` already ends in `:*`; a second one renders `:*:*` and matches no stream.
+    expect(policy).not.toContain(':*:*')
+  })
+})
+
+describe('BffStack — operational visibility', () => {
+  function synthBff() {
+    const app = new cdk.App()
+    const auth = new AuthStack(app, 'TestAuth', { projectName: 'test', env })
+    const stack = new BffStack(app, 'TestBff', {
+      projectName: 'test',
+      userPool: auth.userPool,
+      throttle: { rateLimit: 10, burstLimit: 20 },
+      agentMetricNamespace: 'test/Agent',
+      ...upstreamProps(auth),
+      env,
+    })
+    return Template.fromStack(stack)
+  }
+
+  /**
+   * `logEvent` already emitted one JSON object per line, but Lambda's own START/END/REPORT lines and
+   * any stray `console` call stayed text — so a Logs Insights query filtering on a correlation id
+   * skipped them without saying so.
+   */
+  it('emits structured logs from every function', () => {
+    const template = synthBff()
+
+    const functions = Object.values(template.findResources('AWS::Lambda::Function'))
+    expect(functions.length).toBeGreaterThanOrEqual(3)
+    for (const fn of functions) {
+      const config = (fn.Properties as { LoggingConfig?: { LogFormat?: string } }).LoggingConfig
+      expect(config?.LogFormat).toBe('JSON')
+    }
+  })
+
+  /**
+   * The three original alarms all fire on an error. These fire on the failures that return 200 —
+   * which is the shape an agentic turn fails in most often.
+   */
+  it('alarms on the failures that do not raise an error', () => {
+    const template = synthBff()
+
+    for (const alarmName of [
+      'test-chat-latency',
+      'test-agent-throttles',
+      'test-agent-system-errors',
+      'test-bedrock-throttles',
+    ]) {
+      template.hasResourceProperties('AWS::CloudWatch::Alarm', { AlarmName: alarmName })
+    }
+  })
+
+  /** Every alarm has to reach the topic; one that only changes colour on a page nobody has open is not an alarm. */
+  it('routes every alarm to the notification topic', () => {
+    const template = synthBff()
+
+    for (const alarm of Object.values(template.findResources('AWS::CloudWatch::Alarm'))) {
+      expect((alarm.Properties as { AlarmActions?: unknown[] }).AlarmActions ?? []).not.toHaveLength(0)
+    }
+  })
+
+  it('builds a dashboard covering the turn, the runtime and the model', () => {
+    const template = synthBff()
+
+    template.resourceCountIs('AWS::CloudWatch::Dashboard', 1)
+    const body = JSON.stringify(
+      Object.values(template.findResources('AWS::CloudWatch::Dashboard'))[0]?.Properties,
+    )
+    expect(body).toContain('AWS/Bedrock-AgentCore')
+    expect(body).toContain('AWS/Bedrock')
+    // The token and tool metrics the assessment lists as absent — present once the agent exports them.
+    expect(body).toContain('GenAiAgentTokensInput')
+    expect(body).toContain('GenAiAgentToolErrorCount')
+  })
+
+  /**
+   * A widget charting a namespace nothing writes to renders as a flat zero, which reads as "the
+   * agent is idle" rather than "this was never switched on".
+   */
+  it('omits the agent row when the agent is not exporting metrics', () => {
+    const app = new cdk.App()
+    const auth = new AuthStack(app, 'TestAuth', { projectName: 'test', env })
+    const stack = new BffStack(app, 'TestBff', {
+      projectName: 'test',
+      userPool: auth.userPool,
+      throttle: { rateLimit: 10, burstLimit: 20 },
+      ...upstreamProps(auth),
+      env,
+    })
+
+    const body = JSON.stringify(
+      Object.values(Template.fromStack(stack).findResources('AWS::CloudWatch::Dashboard'))[0]
+        ?.Properties,
+    )
+    expect(body).not.toContain('GenAiAgentTokensInput')
+  })
+})
+
+describe('BffStack — one telemetry model', () => {
+  function synth(tracingEnabled: boolean) {
+    const app = new cdk.App()
+    const auth = new AuthStack(app, 'TestAuth', { projectName: 'test', env })
+    const stack = new BffStack(app, 'TestBff', {
+      projectName: 'test',
+      userPool: auth.userPool,
+      throttle: { rateLimit: 10, burstLimit: 20 },
+      tracingEnabled,
+      ...upstreamProps(auth),
+      env,
+    })
+    return Template.fromStack(stack)
+  }
+
+  /**
+   * The invariant. The X-Ray SDKs went to maintenance mode in February 2026 and the agent container
+   * is already pure OTel, so instrumenting the BFF the other way would make one template bilingual
+   * in tracing — two context models every fork inherits. Asserted by absence, because reaching for
+   * `aws-xray-sdk-core` is the reflex this exists to prevent.
+   */
+  it('instruments with OpenTelemetry and nothing else', () => {
+    const rendered = JSON.stringify(synth(true).toJSON())
+
+    expect(rendered).toContain('AWSOpenTelemetryDistroJs')
+    expect(rendered).not.toContain('aws-xray-sdk')
+    // The legacy layer family bundles an ADOT Collector, which AWS does not recommend for a
+    // CloudWatch destination and which would contradict the agent's own collectorless exporter.
+    expect(rendered).not.toContain('aws-otel-nodejs')
+  })
+
+  /**
+   * The wrapper is what distinguishes the two ADOT layer families, and the wrong one leaves the
+   * function running and uninstrumented — a trace map identical to the broken one, with no error.
+   */
+  it('uses the wrapper the current layer family expects', () => {
+    const template = synth(true)
+
+    for (const fn of Object.values(template.findResources('AWS::Lambda::Function'))) {
+      const environment = (fn.Properties as { Environment?: { Variables?: Record<string, string> } })
+        .Environment?.Variables
+      expect(environment?.AWS_LAMBDA_EXEC_WRAPPER).toBe('/opt/otel-instrument')
+      // Without a service name the map cannot tell two of the three functions apart.
+      expect(environment?.OTEL_SERVICE_NAME).toMatch(/^test-bff/)
+    }
+  })
+
+  it('runs the functions on Graviton', () => {
+    const template = synth(true)
+
+    for (const fn of Object.values(template.findResources('AWS::Lambda::Function'))) {
+      expect((fn.Properties as { Architectures?: string[] }).Architectures).toEqual(['arm64'])
+    }
+  })
+
+  /** Instrumentation is billed telemetry: a deployment that declined tracing must not pay for it. */
+  it('ships no layer when tracing is off', () => {
+    const template = synth(false)
+
+    for (const fn of Object.values(template.findResources('AWS::Lambda::Function'))) {
+      const properties = fn.Properties as { Layers?: unknown[]; Environment?: { Variables?: Record<string, string> } }
+      expect(properties.Layers ?? []).toHaveLength(0)
+      expect(properties.Environment?.Variables?.AWS_LAMBDA_EXEC_WRAPPER).toBeUndefined()
+    }
+  })
+})
+
+/**
+ * The log group AgentCore creates for the runtime, which this stack does not own but must govern.
+ *
+ * The container's stdout never reaches the telemetry log group: `APPLICATION_LOGS` carries the
+ * AgentCore *service's* record of an invocation, not the container's process output. That output —
+ * the agent's rendered reasoning and tool activity — stays in AgentCore's own log group, which the
+ * service leaves with no retention, no CMK and no masking. Without these calls the content policy
+ * covers the spans describing a turn and misses the plainest record of it.
+ */
+
+/** The masking document `governRuntimeLogGroup` hands to `PutDataProtectionPolicy`, parsed. */
+function maskingPolicyOf(template: Template): {
+  Statement: {
+    Sid: string
+    DataIdentifier: string[]
+    Operation: { Audit?: { FindingsDestination: unknown }; Deidentify?: unknown }
+  }[]
+} {
+  const resource = Object.values(template.findResources('Custom::AWS')).find((candidate) =>
+    String((candidate.Properties as { Update?: unknown }).Update).includes('PutDataProtectionPolicy'),
+  )
+  if (!resource) throw new Error('no PutDataProtectionPolicy call in the template')
+
+  const call = JSON.parse(String((resource.Properties as { Update: string }).Update))
+
+  return JSON.parse(call.parameters.policyDocument)
+}
+
+describe('AgentStack — the runtime\'s own log group', () => {
+  function synthGoverned() {
+    const app = new cdk.App()
+    const stack = new cdk.Stack(app, 'TestGoverned', { env })
+    const key = new kms.Key(stack, 'Key')
+
+    governRuntimeLogGroup(stack, {
+      projectName: 'test',
+      runtimeId: 'test_agent-AbCdEf1234',
+      encryptionKey: key,
+      retentionDays: 30,
+      findingsLogGroupName: '/aws/vendedlogs/bedrock-agentcore/test-findings',
+    })
+
+    return Template.fromStack(stack)
+  }
+
+  /** Each call is one custom resource; the four together are what "governed" means here. */
+  it('applies retention, a customer key and a masking policy to it', () => {
+    const calls = JSON.stringify(
+      Object.values(synthGoverned().findResources('AWS::CloudFormation::CustomResource')).concat(
+        Object.values(synthGoverned().findResources('Custom::AWS')),
+      ),
+    )
+
+    for (const action of [
+      'CreateLogGroup',
+      'PutRetentionPolicy',
+      'AssociateKmsKey',
+      'PutDataProtectionPolicy',
+    ]) {
+      expect(calls).toContain(action)
+    }
+  })
+
+  /**
+   * The name is the runtime's id plus the endpoint, so it cannot be written down ahead of time —
+   * which is also why the spans cannot be redirected here: the variables carrying this name are set
+   * on the runtime that produces the id.
+   */
+  it('derives the log group name from the runtime rather than hard-coding one', () => {
+    const calls = JSON.stringify(Object.values(synthGoverned().findResources('Custom::AWS')))
+
+    expect(calls).toContain('/aws/bedrock-agentcore/runtimes/test_agent-AbCdEf1234-DEFAULT')
+  })
+
+  /**
+   * Masking has to match the telemetry group's, or a reader finds in one group what was hidden in
+   * the other. One list feeds both; this asserts the pair actually stayed together.
+   */
+  it('masks the same identifiers as the telemetry log group', () => {
+    const runtimePolicy = JSON.stringify(Object.values(synthGoverned().findResources('Custom::AWS')))
+
+    for (const identifier of ['EmailAddress', 'Name', 'CreditCardNumber', 'AwsSecretKey', 'CpfCode-BR']) {
+      expect(runtimePolicy).toContain(identifier)
+    }
+  })
+
+  /**
+   * The two statements must carry identical identifier lists, and the list must stay short.
+   *
+   * Both halves were learned the hard way. Masking all ten managed identifiers turned ordinary prose
+   * into asterisks and masked the *name* of the span attribute the GenAI console reads. The obvious
+   * fix — audit widely, mask narrowly — is refused by the service: "Audit Statement and Deidentify
+   * Statement must have the same Data Identifiers". So detection and masking are one decision, and
+   * the only lever is which identifiers are precise enough to be worth both.
+   */
+  it('masks only identifiers with a verifiable structure, and audits exactly those', () => {
+    const { Statement } = maskingPolicyOf(synthGoverned())
+    const names = (sid: string) =>
+      (Statement.find((statement) => statement.Sid === sid)?.DataIdentifier ?? []).map((arn) =>
+        arn.slice(arn.lastIndexOf('/') + 1),
+      )
+
+    // The service rejects the policy outright if these differ.
+    expect(names('audit')).toEqual(names('redact'))
+
+    for (const precise of ['EmailAddress', 'CreditCardNumber', 'CpfCode-BR', 'AwsSecretKey']) {
+      expect(names('redact')).toContain(precise)
+    }
+    // The four that matched free text and a bind address. Re-adding one re-breaks the logs.
+    for (const noisy of ['Name', 'Address', 'PhoneNumber-US', 'IpAddress']) {
+      expect(names('redact')).not.toContain(noisy)
+    }
+  })
+
+  /**
+   * The four permissions the audit destination needs, asserted because their absence reads as a
+   * missing feature rather than as missing IAM.
+   *
+   * Sending findings to a log group makes CloudWatch Logs configure a delivery on the caller's
+   * behalf, and it checks the caller for the rights to do that. Without them the whole
+   * `PutDataProtectionPolicy` call fails with "Not authorized to use the audit operation in the data
+   * protection policy" — no mention of IAM, of the destination, or of which action is missing.
+   */
+  it('grants the custom resource what the audit destination requires', () => {
+    const policies = JSON.stringify(Object.values(synthGoverned().findResources('AWS::IAM::Policy')))
+
+    for (const action of [
+      'logs:CreateLogDelivery',
+      'logs:PutResourcePolicy',
+      'logs:DescribeResourcePolicies',
+      'logs:DescribeLogGroups',
+    ]) {
+      expect(policies).toContain(action)
+    }
+  })
+
+  /** An audit statement with no destination computes findings and drops them. */
+  it('sends findings somewhere they can be read', () => {
+    const { Statement } = maskingPolicyOf(synthGoverned())
+    const audit = Statement.find((statement) => statement.Sid === 'audit')
+
+    expect(audit?.Operation.Audit?.FindingsDestination).toEqual({
+      CloudWatchLogs: { LogGroup: '/aws/vendedlogs/bedrock-agentcore/test-findings' },
+    })
+  })
+
+  /**
+   * No delete. The group belongs to AgentCore: a delete ordered before the runtime is gone is simply
+   * recreated and orphaned, which is the failure this template already met once with a RETAINed log
+   * group. Retention is what bounds it instead.
+   */
+  it('does not delete a log group it does not own', () => {
+    const resources = Object.values(synthGoverned().findResources('Custom::AWS'))
+
+    expect(JSON.stringify(resources)).not.toContain('DeleteLogGroup')
+    // `Delete` is where AwsCustomResource renders an `onDelete` SDK call. Note this is not
+    // `DeletionPolicy`, which every custom resource carries and which only governs the custom
+    // resource itself — reading one for the other is what made the first version of this pass
+    // vacuously.
+    for (const resource of resources) {
+      expect((resource.Properties as Record<string, unknown>).Delete).toBeUndefined()
+    }
   })
 })
