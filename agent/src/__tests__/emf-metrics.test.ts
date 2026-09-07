@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { DataPointType, type ResourceMetrics } from '@opentelemetry/sdk-metrics'
-import { metricName, toEmfRecords } from '../emf-metrics'
+import { EmfMetricExporter, metricName, toEmfRecords } from '../emf-metrics'
 
 /**
  * A collection shaped the way the SDK hands one over, carrying only the fields the mapping reads.
@@ -116,5 +116,30 @@ describe('toEmfRecords', () => {
 
   it('yields nothing for a collection with no datapoints', () => {
     expect(toEmfRecords(collection([]), 'AgenticApp/Agent', 'my-agent')).toEqual([])
+  })
+})
+
+/**
+ * The stream name, asserted because the old one collapsed every replica onto one stream.
+ *
+ * It was `metrics/${process.env.HOSTNAME || 'local'}`, with a comment explaining that per-container
+ * streams avoid a sequence-token race between replicas. AgentCore sets no `HOSTNAME`, so every
+ * container resolved `metrics/local` and they all raced for exactly the stream the comment claimed
+ * to have separated — the premise was false and the code read as if it were true.
+ */
+describe('EmfMetricExporter stream naming', () => {
+  it('gives each process its own stream when the platform names no container', () => {
+    const first = new EmfMetricExporter({ AGENT_METRICS_LOG_GROUP: '/g' }).logStream
+    const second = new EmfMetricExporter({ AGENT_METRICS_LOG_GROUP: '/g' }).logStream
+
+    expect(first).toMatch(/^metrics\//)
+    expect(first).not.toBe(second)
+    expect(first).not.toBe('metrics/local')
+  })
+
+  it('prefers a container name when one exists', () => {
+    expect(new EmfMetricExporter({ AGENT_METRICS_LOG_GROUP: '/g', HOSTNAME: 'box-7' }).logStream).toBe(
+      'metrics/box-7',
+    )
   })
 })

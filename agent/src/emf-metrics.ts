@@ -14,6 +14,7 @@
  * `gen_ai.agent.tool.duration`, `gen_ai.agent.model.latency` and `gen_ai.server.time_to_first_token`.
  * The assessment lists these as absent business metrics; they were never absent, only unexported.
  */
+import { randomUUID } from 'node:crypto'
 import {
   CloudWatchLogsClient,
   PutLogEventsCommand,
@@ -128,12 +129,22 @@ export class EmfMetricExporter implements PushMetricExporter {
     this.serviceName = env.OTEL_SERVICE_NAME || 'agent'
     // One stream per container. Two replicas writing the same stream would have their sequence
     // tokens race; per-container streams cost nothing and remove the contention entirely.
-    this.logStreamName = `metrics/${process.env.HOSTNAME || 'local'}`
+    //
+    // Generated, not read from `HOSTNAME`: AgentCore does not set that variable, so every replica
+    // resolved the same `metrics/local` and they all shared one stream — precisely the contention
+    // this line claims to prevent. A per-process id is what "one stream per container" has to mean
+    // when the platform offers no container name to borrow.
+    this.logStreamName = `metrics/${env.HOSTNAME?.trim() || randomUUID().slice(0, 8)}`
   }
 
   /** Configured only in a deployed runtime. Unset, the exporter is a no-op rather than an error. */
   get configured(): boolean {
     return Boolean(this.logGroupName)
+  }
+
+  /** The stream these records are written to. Exposed so a test can assert it is per-process. */
+  get logStream(): string {
+    return this.logStreamName
   }
 
   export(metrics: ResourceMetrics, resultCallback: (result: ExportResult) => void): void {
