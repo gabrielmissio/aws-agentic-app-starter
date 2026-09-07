@@ -49,6 +49,27 @@ describe('AWS SDK instrumentation', () => {
 })
 
 /**
+ * Every AWS call a turn makes has to happen inside the turn's trace context.
+ *
+ * Once the SDK is instrumented, each call raises a span that attaches to whatever context is active
+ * when it starts. `loadHistory` used to run before `withRemoteContext`, so its `ListEvents` span
+ * began with no active context and became the *root of its own trace* — the account showed exactly
+ * that, a two-span orphan trace alongside the real one. The turn's trace then showed the model call
+ * and the memory write but not the memory read, which is the span that explains a slow start.
+ *
+ * Line order is the only thing enforcing this, and moving a read "up for clarity" silently splits
+ * the trace again, so it is asserted rather than left to review.
+ */
+describe('turn tracing', () => {
+  const index = read('../index.ts')
+
+  it('reads history inside the trace context, not before it', () => {
+    expect(index.indexOf('withRemoteContext(req.headers')).toBeGreaterThan(-1)
+    expect(index.indexOf('await loadHistory(')).toBeGreaterThan(index.indexOf('withRemoteContext(req.headers'))
+  })
+})
+
+/**
  * The condition that retires this repo's hand-written OTLP transport.
  *
  * `otlp-sigv4.ts` and `emf-metrics.ts` exist only because the ADOT JavaScript distro cannot yet do

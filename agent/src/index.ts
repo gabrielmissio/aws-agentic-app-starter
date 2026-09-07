@@ -48,16 +48,6 @@ app.post(
       // report, the BFF log line and the stored exchange.
       const correlationId = parseBaggage(req.headers['baggage'] as string | undefined).correlationId
 
-      // Prior turns, replayed into this one. A read failure is not fatal: answering without history
-      // is a worse conversation, but refusing the turn outright is a worse outage.
-      let history: Awaited<ReturnType<typeof loadHistory>>
-      try {
-        history = sessionId ? await loadHistory(sessionId) : undefined
-      } catch (err) {
-        console.error(JSON.stringify({ level: 'error', event: 'memory.load.failed', correlationId, sessionId }))
-        console.error(err)
-      }
-
       res.setHeader('Content-Type', 'text/event-stream')
       res.setHeader('Cache-Control', 'no-cache')
       res.setHeader('Connection', 'keep-alive')
@@ -72,6 +62,24 @@ app.post(
       // here rather than around the agent's construction.
       await withRemoteContext(req.headers as Record<string, string | undefined>, () =>
         withCaller(caller, async () => {
+          // Prior turns, replayed into this one. A read failure is not fatal: answering without
+          // history is a worse conversation, but refusing the turn outright is a worse outage.
+          //
+          // Read *inside* the trace context, and that placement is the fix for a real defect: it
+          // used to run before `withRemoteContext`, so the `ListEvents` span the AWS SDK
+          // instrumentation raises for it started with no active context and became the root of a
+          // separate trace. The turn's own trace then showed the model call and the memory write but
+          // not the memory read — the one span that explains a slow start.
+          let history: Awaited<ReturnType<typeof loadHistory>>
+          try {
+            history = sessionId ? await loadHistory(sessionId) : undefined
+          } catch (err) {
+            console.error(
+              JSON.stringify({ level: 'error', event: 'memory.load.failed', correlationId, sessionId }),
+            )
+            console.error(err)
+          }
+
           // No session id means something invoked the runtime directly rather than through the BFF.
           // That turn still answers, but it starts empty and is never recorded — and it carries no
           // `session.id`, which is the attribute CloudWatch's GenAI Observability page groups a
