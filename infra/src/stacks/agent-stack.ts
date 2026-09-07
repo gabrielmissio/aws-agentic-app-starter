@@ -5,6 +5,7 @@ import * as ecrassets from 'aws-cdk-lib/aws-ecr-assets'
 import * as iam from 'aws-cdk-lib/aws-iam'
 import * as kms from 'aws-cdk-lib/aws-kms'
 import * as logs from 'aws-cdk-lib/aws-logs'
+import * as cr from 'aws-cdk-lib/custom-resources'
 import { Construct } from 'constructs'
 import { fileURLToPath } from 'node:url'
 
@@ -445,6 +446,16 @@ export class AgentStack extends cdk.Stack {
         logGroup: observability.logGroup,
         runtimeArn: runtime.attrAgentRuntimeArn,
       })
+
+      // The container's stdout lands in a log group AgentCore creates, not this one. Governing it
+      // here is what keeps the content policy from covering the spans that describe a turn while
+      // missing the plainest record of it — see the note on the function.
+      governRuntimeLogGroup(this, {
+        projectName,
+        runtimeId: runtime.attrAgentRuntimeId,
+        encryptionKey,
+        retentionDays: conversationRetentionDays,
+      })
     }
     this.runtimeStatus = runtime.attrStatus
     this.executionRoleArn = runtimeRole.roleArn
@@ -621,12 +632,56 @@ export function bedrockModelResources(
 }
 
 /**
- * The log group every signal from this agent lands in, and the deliveries that route them there.
+ * What CloudWatch Logs masks on write, in both of this agent's log groups.
  *
- * Four producers write here, which is the point: the container's stdout, the spans the container
- * exports over OTLP, the EMF records its metrics arrive as, and AgentCore's own application and
- * usage logs. Retention, encryption and masking are properties of a log group, so consolidating is
- * what lets one decision cover all four.
+ * One list with two consumers: the telemetry log group takes it through the L2
+ * `DataProtectionPolicy`, and the runtime's own log group — which AgentCore creates, not this stack
+ * — takes it as a raw policy document through `governRuntimeLogGroup`. Splitting them would let the
+ * two drift, and the point of the policy is that a reader cannot find in one group what was masked
+ * in the other.
+ */
+const MASKED_IDENTIFIERS = [
+  logs.DataIdentifier.EMAILADDRESS,
+  logs.DataIdentifier.NAME,
+  logs.DataIdentifier.ADDRESS,
+  logs.DataIdentifier.PHONENUMBER_US,
+  logs.DataIdentifier.CREDITCARDNUMBER,
+  logs.DataIdentifier.SSN_US,
+  logs.DataIdentifier.CPFCODE_BR,
+  logs.DataIdentifier.AWSSECRETKEY,
+  logs.DataIdentifier.OPENSSHPRIVATEKEY,
+  logs.DataIdentifier.IPADDRESS,
+]
+
+/** The same policy the L2 construct renders, as the document `PutDataProtectionPolicy` expects. */
+function maskingPolicyDocument(projectName: string): string {
+  const identifiers = MASKED_IDENTIFIERS.map(
+    (identifier) => `arn:aws:dataprotection::aws:data-identifier/${identifier.name}`,
+  )
+
+  return JSON.stringify({
+    Name: `${projectName}-runtime-masking`,
+    Description: "Masks personal and credential data in the agent's own log group.",
+    Version: '2021-06-01',
+    Statement: [
+      { Sid: 'audit', DataIdentifier: identifiers, Operation: { Audit: { FindingsDestination: {} } } },
+      { Sid: 'redact', DataIdentifier: identifiers, Operation: { Deidentify: { MaskConfig: {} } } },
+    ],
+  })
+}
+
+/**
+ * The log group this agent's *telemetry* lands in, and the deliveries that route it there.
+ *
+ * Three producers write here: the spans the container exports over OTLP, the EMF records its
+ * metrics arrive as, and AgentCore's own application and usage logs.
+ *
+ * The container's stdout is deliberately *not* in that list, and an earlier version of this comment
+ * claimed it was. `APPLICATION_LOGS` is the AgentCore *service's* log of an invocation, not the
+ * process output of the container — the account showed five service records against 351 lines of
+ * stdout over the same hour. The container's own output stays in the log group AgentCore creates,
+ * and `governRuntimeLogGroup` is what puts it under the same retention, key and masking rather than
+ * moving it here.
  */
 export function createObservability(
   scope: Construct,
@@ -657,18 +712,7 @@ export function createObservability(
   const dataProtectionPolicy = new logs.DataProtectionPolicy({
     name: `${projectName}-agent-masking`,
     description: 'Masks personal and credential data in agent telemetry.',
-    identifiers: [
-      logs.DataIdentifier.EMAILADDRESS,
-      logs.DataIdentifier.NAME,
-      logs.DataIdentifier.ADDRESS,
-      logs.DataIdentifier.PHONENUMBER_US,
-      logs.DataIdentifier.CREDITCARDNUMBER,
-      logs.DataIdentifier.SSN_US,
-      logs.DataIdentifier.CPFCODE_BR,
-      logs.DataIdentifier.AWSSECRETKEY,
-      logs.DataIdentifier.OPENSSHPRIVATEKEY,
-      logs.DataIdentifier.IPADDRESS,
-    ],
+    identifiers: [...MASKED_IDENTIFIERS],
   })
 
   const logGroup = new logs.LogGroup(scope, 'AgentTelemetryLogs', {
@@ -723,6 +767,113 @@ export function createObservability(
   })
 
   return { logGroup, metricNamespace: `${projectName}/Agent` }
+}
+
+/**
+ * Puts the log group AgentCore creates for this runtime under the same controls as our own.
+ *
+ * **Why this exists.** The container's stdout does not reach the telemetry log group — see the note
+ * on `createObservability`. It lands in `/aws/bedrock-agentcore/runtimes/<id>-DEFAULT`, a log group
+ * this stack does not create, which AgentCore leaves with no retention, no CMK and no data
+ * protection policy. That output is not incidental: it carries the agent's rendered reasoning and
+ * tool activity, so leaving it ungoverned means the content policy covers the spans describing a
+ * turn while missing the plainest record of it.
+ *
+ * **Why a custom resource instead of a `LogGroup`.** Declaring it as a CDK log group would work on a
+ * first deploy and fail on every upgrade: AgentCore has already created it by then, and
+ * CloudFormation refuses to adopt an existing group. The calls below converge either way.
+ *
+ * **Why not simply move the spans there instead**, which is the unified span destination AWS
+ * documents. The log group's name derives from the runtime id, and the three variables that would
+ * carry it (`OTEL_EXPORTER_OTLP_TRACES_HEADERS`, `AGENT_METRICS_LOG_GROUP`,
+ * `OTEL_RESOURCE_ATTRIBUTES`) are set *on that same runtime* — a self-reference CloudFormation
+ * rejects. AgentCore injects no variable carrying the runtime's own identity, so the container
+ * cannot derive the name either. Governing the group where it already is reaches the outcome AWS
+ * gives as the reason for the unified destination — scoping retention, encryption and access to one
+ * agent — without a runtime that rewrites itself on every deploy. See `docs/assessment.md`.
+ *
+ * Nothing here deletes the group on `cdk destroy`. It belongs to AgentCore, and a delete ordered
+ * before the runtime is gone would simply be recreated, orphaned — the failure mode this template
+ * already met once with a `RETAIN`ed log group. The retention applied below is what bounds it.
+ */
+export function governRuntimeLogGroup(
+  scope: Construct,
+  options: {
+    projectName: string
+    runtimeId: string
+    encryptionKey: kms.IKey
+    retentionDays: number
+  },
+): void {
+  const { projectName, runtimeId, encryptionKey, retentionDays } = options
+  const stack = cdk.Stack.of(scope)
+
+  // `DEFAULT` is the endpoint name, and the only endpoint this stack creates.
+  const logGroupName = `/aws/bedrock-agentcore/runtimes/${runtimeId}-DEFAULT`
+  const logGroupArn = stack.formatArn({
+    service: 'logs',
+    resource: 'log-group',
+    resourceName: `${logGroupName}:*`,
+    arnFormat: cdk.ArnFormat.COLON_RESOURCE_NAME,
+  })
+
+  const policy = cr.AwsCustomResourcePolicy.fromStatements([
+    new iam.PolicyStatement({
+      actions: [
+        'logs:CreateLogGroup',
+        'logs:PutRetentionPolicy',
+        'logs:AssociateKmsKey',
+        'logs:PutDataProtectionPolicy',
+      ],
+      resources: [logGroupArn],
+    }),
+    // Associating a key is CloudWatch Logs asking KMS on our behalf, and the caller is checked too.
+    new iam.PolicyStatement({
+      actions: ['kms:DescribeKey'],
+      resources: [encryptionKey.keyArn],
+    }),
+  ])
+
+  /** Each call re-runs on every deploy, so the group converges even if someone edits it by hand. */
+  const call = (id: string, action: string, parameters: Record<string, unknown>, ignore?: string) =>
+    new cr.AwsCustomResource(scope, id, {
+      onUpdate: {
+        service: 'CloudWatchLogs',
+        action,
+        parameters,
+        physicalResourceId: cr.PhysicalResourceId.of(`${logGroupName}/${action}`),
+        ...(ignore ? { ignoreErrorCodesMatching: ignore } : {}),
+      },
+      policy,
+      // The bundled SDK is the one the Lambda runtime ships; fetching a newer one on every
+      // invocation costs a cold start and pins nothing useful.
+      installLatestAwsSdk: false,
+    })
+
+  // AgentCore creates the group on the runtime's first invocation, which has not happened yet on a
+  // first deploy — so the policies below would fail with `ResourceNotFoundException`. Creating it
+  // ourselves makes the ordering irrelevant; AgentCore adopts an existing group.
+  const ensure = call('RuntimeLogGroupEnsure', 'CreateLogGroup', { logGroupName }, 'ResourceAlreadyExistsException')
+
+  const retention = call('RuntimeLogGroupRetention', 'PutRetentionPolicy', {
+    logGroupName,
+    retentionInDays: nearestRetention(retentionDays),
+  })
+  retention.node.addDependency(ensure)
+
+  // The key policy already grants `logs.<region>.amazonaws.com` for every log group in this account
+  // and Region, so no grant is needed here — see `AllowCloudWatchLogs` on the stack's key.
+  const encryption = call('RuntimeLogGroupEncryption', 'AssociateKmsKey', {
+    logGroupName,
+    kmsKeyId: encryptionKey.keyArn,
+  })
+  encryption.node.addDependency(retention)
+
+  const masking = call('RuntimeLogGroupMasking', 'PutDataProtectionPolicy', {
+    logGroupIdentifier: logGroupName,
+    policyDocument: maskingPolicyDocument(projectName),
+  })
+  masking.node.addDependency(encryption)
 }
 
 /**

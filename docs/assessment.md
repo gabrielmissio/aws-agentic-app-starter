@@ -512,8 +512,46 @@ were called absent turn out to have been emitted by Strands all along and merely
 | CloudWatch dashboard | present — turn health, AgentCore runtime, Bedrock, and the agent row |
 | Latency / throttle / Bedrock-error alarms | present — the failures that return 200, which the original three error alarms could not see |
 | Content policy on telemetry | layered: origin-side redaction of what the guardrail cannot reach, destination-side masking for the rest |
+| Content policy on the container's stdout | present — `governRuntimeLogGroup` applies the same retention, CMK and masking to AgentCore's own log group |
 | A declared SLO | **still absent** — see the deferred items below |
 | Client-side (RUM) telemetry | **still absent** — see the deferred items below |
+
+**Decision — where the agent's logs live, and why not the unified span destination.**
+
+Since 2026-07-20 AgentCore delivers spans, prompts, structured logs and stdout to a single per-agent
+log group (`/aws/bedrock-agentcore/runtimes/<id>-<endpoint>`), and AWS gives the reason as scoping
+*"access control and encryption to an individual agent"*. This template does **not** redirect its
+spans there. The reasoning, and the impact of each side:
+
+- **The blocker is structural, not preference.** That log group's name derives from the runtime id.
+  The three variables that would have to carry it — `OTEL_EXPORTER_OTLP_TRACES_HEADERS`,
+  `AGENT_METRICS_LOG_GROUP`, `OTEL_RESOURCE_ATTRIBUTES` — are set *on the runtime that produces the
+  id*, which CloudFormation rejects as a self-reference. AgentCore injects no variable carrying the
+  runtime's own identity, so the container cannot derive the name at boot either. The remaining
+  routes are a custom resource calling `UpdateAgentRuntime` after creation (a runtime that rewrites
+  itself, and a new runtime version, on every deploy) or a `ListAgentRuntimes` call at boot (a new
+  IAM permission and a new failure mode: the agent starts blind if it fails).
+- **The ADOT JavaScript distro cannot do it either.** The unified destination needs the SDK to honour
+  `OTEL_EXPORTER_OTLP_TRACES_HEADERS`. ADOT Python (0.19.0) does; ADOT JavaScript (0.12.0) contains
+  no reference to that variable at all — `x-aws-log-group` is read only for *logs* there. Adopting
+  the distro today would move spans back to the shared `aws/spans`, losing this deployment's
+  retention, CMK and masking, and would also drop origin-side redaction, since the package exposes
+  only `./register` and no extension point for a span processor.
+- **What is done instead.** Telemetry consolidates in a log group this stack owns
+  (`/aws/vendedlogs/bedrock-agentcore/<project>`), and `governRuntimeLogGroup` applies the same
+  retention, the same CMK and the same masking identifiers to AgentCore's own log group where it
+  already is. The outcome AWS names as the reason for the unified destination is reached; the number
+  of log groups is two rather than one.
+- **The impact of getting this wrong was measured, not assumed.** `APPLICATION_LOGS` is the AgentCore
+  *service's* record of an invocation, not the container's process output — five service records
+  against 351 lines of stdout in the same hour. Before `governRuntimeLogGroup`, that stdout — which
+  carries the agent's rendered reasoning and tool activity — sat in a log group with no retention, no
+  CMK and no data protection policy, while the spans describing the same turns were fully governed.
+- **What would reverse this.** Any one of: ADOT JavaScript gaining `OTEL_EXPORTER_OTLP_TRACES_HEADERS`
+  support together with a span-processor extension point; or AgentCore exposing the runtime id to the
+  container as an environment variable. Either would also retire `otlp-sigv4.ts` and `emf-metrics.ts`,
+  which exist only because the distro cannot yet replace them. Re-check on any ADOT JavaScript
+  upgrade; the check is `grep -r TRACES_HEADERS` in the published package.
 
 **Deferred, deliberately, with the reason recorded:**
 

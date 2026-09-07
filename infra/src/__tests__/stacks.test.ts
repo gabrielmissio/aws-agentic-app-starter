@@ -21,6 +21,7 @@ import {
   bedrockModelResources,
   createObservability,
   createTelemetryDeliveries,
+  governRuntimeLogGroup,
 } from '../stacks/agent-stack.js'
 import { AuthStack } from '../stacks/auth-stack.js'
 import { BffStack } from '../stacks/bff-stack.js'
@@ -1197,6 +1198,91 @@ describe('BffStack — one telemetry model', () => {
       const properties = fn.Properties as { Layers?: unknown[]; Environment?: { Variables?: Record<string, string> } }
       expect(properties.Layers ?? []).toHaveLength(0)
       expect(properties.Environment?.Variables?.AWS_LAMBDA_EXEC_WRAPPER).toBeUndefined()
+    }
+  })
+})
+
+/**
+ * The log group AgentCore creates for the runtime, which this stack does not own but must govern.
+ *
+ * The container's stdout never reaches the telemetry log group: `APPLICATION_LOGS` carries the
+ * AgentCore *service's* record of an invocation, not the container's process output. That output —
+ * the agent's rendered reasoning and tool activity — stays in AgentCore's own log group, which the
+ * service leaves with no retention, no CMK and no masking. Without these calls the content policy
+ * covers the spans describing a turn and misses the plainest record of it.
+ */
+describe('AgentStack — the runtime\'s own log group', () => {
+  function synthGoverned() {
+    const app = new cdk.App()
+    const stack = new cdk.Stack(app, 'TestGoverned', { env })
+    const key = new kms.Key(stack, 'Key')
+
+    governRuntimeLogGroup(stack, {
+      projectName: 'test',
+      runtimeId: 'test_agent-AbCdEf1234',
+      encryptionKey: key,
+      retentionDays: 30,
+    })
+
+    return Template.fromStack(stack)
+  }
+
+  /** Each call is one custom resource; the four together are what "governed" means here. */
+  it('applies retention, a customer key and a masking policy to it', () => {
+    const calls = JSON.stringify(
+      Object.values(synthGoverned().findResources('AWS::CloudFormation::CustomResource')).concat(
+        Object.values(synthGoverned().findResources('Custom::AWS')),
+      ),
+    )
+
+    for (const action of [
+      'CreateLogGroup',
+      'PutRetentionPolicy',
+      'AssociateKmsKey',
+      'PutDataProtectionPolicy',
+    ]) {
+      expect(calls).toContain(action)
+    }
+  })
+
+  /**
+   * The name is the runtime's id plus the endpoint, so it cannot be written down ahead of time —
+   * which is also why the spans cannot be redirected here: the variables carrying this name are set
+   * on the runtime that produces the id.
+   */
+  it('derives the log group name from the runtime rather than hard-coding one', () => {
+    const calls = JSON.stringify(Object.values(synthGoverned().findResources('Custom::AWS')))
+
+    expect(calls).toContain('/aws/bedrock-agentcore/runtimes/test_agent-AbCdEf1234-DEFAULT')
+  })
+
+  /**
+   * Masking has to match the telemetry group's, or a reader finds in one group what was hidden in
+   * the other. One list feeds both; this asserts the pair actually stayed together.
+   */
+  it('masks the same identifiers as the telemetry log group', () => {
+    const runtimePolicy = JSON.stringify(Object.values(synthGoverned().findResources('Custom::AWS')))
+
+    for (const identifier of ['EmailAddress', 'Name', 'CreditCardNumber', 'AwsSecretKey', 'CpfCode-BR']) {
+      expect(runtimePolicy).toContain(identifier)
+    }
+  })
+
+  /**
+   * No delete. The group belongs to AgentCore: a delete ordered before the runtime is gone is simply
+   * recreated and orphaned, which is the failure this template already met once with a RETAINed log
+   * group. Retention is what bounds it instead.
+   */
+  it('does not delete a log group it does not own', () => {
+    const resources = Object.values(synthGoverned().findResources('Custom::AWS'))
+
+    expect(JSON.stringify(resources)).not.toContain('DeleteLogGroup')
+    // `Delete` is where AwsCustomResource renders an `onDelete` SDK call. Note this is not
+    // `DeletionPolicy`, which every custom resource carries and which only governs the custom
+    // resource itself — reading one for the other is what made the first version of this pass
+    // vacuously.
+    for (const resource of resources) {
+      expect((resource.Properties as Record<string, unknown>).Delete).toBeUndefined()
     }
   })
 })
