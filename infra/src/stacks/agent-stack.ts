@@ -201,12 +201,6 @@ export class AgentStack extends cdk.Stack {
           projectName,
           encryptionKey,
           retentionDays: conversationRetentionDays,
-          runtimeArn: cdk.Stack.of(this).formatArn({
-            service: 'bedrock-agentcore',
-            resource: 'runtime',
-            resourceName: '*',
-            arnFormat: cdk.ArnFormat.SLASH_RESOURCE_NAME,
-          }),
         })
       : undefined
 
@@ -441,6 +435,17 @@ export class AgentStack extends cdk.Stack {
 
     this.runtimeArn = runtime.attrAgentRuntimeArn
     this.runtimeId = runtime.attrAgentRuntimeId
+
+    // Here, and not beside the log group, because a delivery source names the runtime by ARN — see
+    // the note on the function. Everything above this line only needed the log group's *name*, which
+    // is ours to choose; this needs the runtime's identity, which AgentCore assigns.
+    if (observability) {
+      createTelemetryDeliveries(this, {
+        projectName,
+        logGroup: observability.logGroup,
+        runtimeArn: runtime.attrAgentRuntimeArn,
+      })
+    }
     this.runtimeStatus = runtime.attrStatus
     this.executionRoleArn = runtimeRole.roleArn
     this.imageUri = imageAsset.imageUri
@@ -629,10 +634,9 @@ export function createObservability(
     projectName: string
     encryptionKey: kms.IKey
     retentionDays: number
-    runtimeArn: string
   },
 ): { logGroup: logs.LogGroup; metricNamespace: string } {
-  const { projectName, encryptionKey, retentionDays, runtimeArn } = options
+  const { projectName, encryptionKey, retentionDays } = options
   const stack = cdk.Stack.of(scope)
 
   /**
@@ -718,6 +722,27 @@ export function createObservability(
     }),
   })
 
+  return { logGroup, metricNamespace: `${projectName}/Agent` }
+}
+
+/**
+ * Joins AgentCore's own signals to the telemetry log group.
+ *
+ * Separate from `createObservability`, and called after the runtime exists, because the delivery
+ * source names the runtime by ARN — and the ARN is only knowable once CloudFormation has created it.
+ * This used to be one function, which forced the source to be registered against a wildcard
+ * (`...:runtime/*`) built before the runtime. CloudFormation accepted it and the console reported
+ * three active deliveries, but a wildcard matches no runtime: `APPLICATION_LOGS` and `USAGE_LOGS`
+ * delivered nothing, ever, and the agent's logs stayed in the log group AgentCore creates by
+ * default — the one with no retention, no CMK and no data protection policy. The split is what lets
+ * the source name the runtime it actually describes.
+ */
+export function createTelemetryDeliveries(
+  scope: Construct,
+  options: { projectName: string; logGroup: logs.LogGroup; runtimeArn: string },
+): void {
+  const { projectName, logGroup, runtimeArn } = options
+
   // AgentCore's own signals reach CloudWatch through vended-log delivery rather than by the runtime
   // writing them, so each needs a source, a destination and a delivery joining the two. Without
   // these three, the corresponding panes of the GenAI Observability console are simply blank.
@@ -756,8 +781,6 @@ export function createObservability(
     delivery.addResourceDependency(source)
     delivery.addResourceDependency(destination)
   }
-
-  return { logGroup, metricNamespace: `${projectName}/Agent` }
 }
 
 /**

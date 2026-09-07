@@ -17,7 +17,11 @@ import { describe, expect, it } from 'vitest'
 import * as cdk from 'aws-cdk-lib'
 import * as kms from 'aws-cdk-lib/aws-kms'
 import { Match, Template } from 'aws-cdk-lib/assertions'
-import { bedrockModelResources, createObservability } from '../stacks/agent-stack.js'
+import {
+  bedrockModelResources,
+  createObservability,
+  createTelemetryDeliveries,
+} from '../stacks/agent-stack.js'
 import { AuthStack } from '../stacks/auth-stack.js'
 import { BffStack } from '../stacks/bff-stack.js'
 import { FrontendStack } from '../stacks/frontend-stack.js'
@@ -868,6 +872,8 @@ describe('the agent may invoke one model, not every model', () => {
  * `bedrockModelResources` is exercised as a pure function.
  */
 describe('AgentStack — agent telemetry', () => {
+  const RUNTIME_ARN = 'arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/test-aBcDeF1234'
+
   function synthObservability(retentionDays = 30) {
     const app = new cdk.App()
     const stack = new cdk.Stack(app, 'TestTelemetry', { env })
@@ -877,7 +883,13 @@ describe('AgentStack — agent telemetry', () => {
       projectName: 'test',
       encryptionKey: key,
       retentionDays,
-      runtimeArn: 'arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/*',
+    })
+
+    // A concrete runtime ARN, never a wildcard — see the regression test below.
+    createTelemetryDeliveries(stack, {
+      projectName: 'test',
+      logGroup: result.logGroup,
+      runtimeArn: RUNTIME_ARN,
     })
 
     return { result, template: Template.fromStack(stack) }
@@ -943,6 +955,28 @@ describe('AgentStack — agent telemetry', () => {
     template.resourceCountIs('AWS::Logs::Delivery', 3)
     for (const logType of ['APPLICATION_LOGS', 'USAGE_LOGS', 'TRACES']) {
       template.hasResourceProperties('AWS::Logs::DeliverySource', { LogType: logType })
+    }
+  })
+
+  /**
+   * The ARN the source is registered against, asserted because a wildcard here is invisible.
+   *
+   * This was built as `...:runtime/*` — an ARN assembled before the runtime existed, because the log
+   * group and the deliveries were created by one function that ran too early to know the runtime's
+   * identity. CloudFormation accepts that string, the console lists three active deliveries, and
+   * nothing is ever delivered: a wildcard matches no runtime. The failure has no error and no empty
+   * pane to notice, only logs that quietly stay in AgentCore's default log group, outside every
+   * control this stack applies. Hence a test on the shape of the ARN rather than on its presence.
+   */
+  it('registers the delivery source against the runtime, not a wildcard', () => {
+    const { template } = synthObservability()
+
+    const sources = Object.values(template.findResources('AWS::Logs::DeliverySource'))
+    expect(sources).toHaveLength(3)
+    for (const source of sources) {
+      const arn = (source.Properties as { ResourceArn?: string }).ResourceArn
+      expect(arn).toBe(RUNTIME_ARN)
+      expect(arn).not.toContain('*')
     }
   })
 
