@@ -1951,8 +1951,8 @@ architecture or security design. That is the profile of a foundation to build on
 (passing; one low dev-only advisory), and `cdk synth` under three profile configurations (demo:
 success; pilot unpinned: refused; pilot with sandbox defaults: refused with 10 named violations; pilot
 fully configured: success, 119 resources), plus static analysis of the four synthesized CloudFormation
-templates. No AWS resource was created or modified. No prior assessment was consulted. Sections 20 and 21
-record the P0 and P1 remediation applied afterwards.*
+templates. No AWS resource was created or modified. No prior assessment was consulted. Sections 20-22
+record the remediation applied afterwards.*
 
 ---
 
@@ -2145,3 +2145,90 @@ instruction still ships with a green suite. This is the largest single gap in §
 
 P1-4 (eval set, M). P2 in full, plus the re-scoped IaC policy scan. P3 in full. And the `docs/`
 decision recorded at the end of §20.
+
+---
+
+## 22. Addendum — the CI gate reworked
+
+A review of the workflow shipped in §21 found two defects in it and one design choice that does not
+survive contact with a template. All three are corrected. **P2-1's synth gate is now also delivered**,
+which was the change §21 recommended and did not make.
+
+### What was wrong with §21's workflow
+
+| # | Defect | Evidence |
+|---|---|---|
+| 1 | **The scanner was not actually pinned.** The `trufflehog` action was pinned by commit SHA, which pins the *wrapper*, not the tool: its `action.yml` declares `version` with `default: "latest"` and runs `docker run ghcr.io/trufflesecurity/trufflehog:${VERSION}`. Every run pulled whatever was newest | Read from the action manifest at the pinned SHA |
+| 2 | **The `--results` rationale was factually wrong.** The comment claimed `verified,unknown` was chosen to catch already-rotated keys that `--only-verified` would miss. It is the opposite: a candidate a detector checks and finds dead is `unverified`, which `verified,unknown` *excludes*. The setting is right; the stated reason was not | TruffleHog's result states are `verified`, `unknown`, `unverified` |
+| 3 | **`base: '' / head: HEAD` forced a full-history scan on every pull request.** It also overrode the action's event-aware defaults, so the diff scan a PR should get never happened | The manifest's branch logic: with `base`/`head` unset it derives the range from the event |
+| 4 | **CodeQL was the wrong baseline for a template.** Its results upload requires code scanning, which needs GitHub Code Security — paid on private repositories. Every fork in a private org would inherit a job that goes red for a reason the fork cannot fix without buying something | GitHub's code-scanning availability |
+
+### The workflow now
+
+Five jobs, each named for the concern it covers, and the whole gate runs on a fresh clone with no AWS
+credentials, no repository secrets and no paid feature:
+
+| Job | Runs | Notes |
+|---|---|---|
+| `verify` | `npm run verify` then `npm run build` | Identical to the local commands |
+| `audit` | `npm run audit` | Its own job now, and it installs nothing — `npm audit` resolves from the lockfiles, verified |
+| `synth` | `npm run synth` | **New.** The only check that executes the real `app.ts`. Credential-free because `CDK_DEFAULT_ACCOUNT` is unset, and Docker-free because CDK stages a container asset at synth and builds it at publish |
+| `secrets` | TruffleHog, `version: 3.97.4` | Diff on a pull request, full history on the weekly schedule |
+| `sast` | Semgrep CE, `p/default`, image pinned by digest | No account, no token; `p/default` is fetched anonymously |
+
+Also: `concurrency` with `cancel-in-progress`, so a newer push supersedes an in-flight run;
+`cache-dependency-path: '**/package-lock.json'` instead of five enumerated paths, so a new package
+cannot silently fall out of the cache key; a `schedule` + `workflow_dispatch` trigger, which is what
+makes the full-history scan and a fresh advisory check possible without slowing every PR; and
+`permissions: contents: read` with **no job raising it** — `security-events: write` is gone with CodeQL,
+so the workflow now writes nothing at all.
+
+`npm run synth` needed no new script: `dotenvx run -f .env` warns and continues when `.env` is absent,
+so the command a contributor runs is the command CI runs. `npm run build` **was** added to the root —
+the frontend and BFF builds already ran via `infra`'s `pretest`, but the agent bundle was built by
+nothing in the gate.
+
+### Semgrep's baseline, and what it found
+
+Not adopted blind — measured first: 267 rules over 163 files, **5 findings**. Three were real and are
+fixed; two are suppressed at the line with the evidence beside them.
+
+| Finding | Disposition |
+|---|---|
+| `dependabot-missing-cooldown` ×2 | **Fixed, and a genuine improvement.** `.github/dependabot.yml` now sets `cooldown: default-days: 7` on both ecosystems. The npm supply-chain attacks of recent years share a shape — a compromised maintainer publishes a malicious patch, and it is yanked within days — so a bot that upgrades on publication day is the fastest path from that compromise into a fork. Security updates are exempt |
+| `unsafe-formatstring` in `agent/src/invoke.ts` | **Fixed.** The event type came from the model's own stream and was interpolated into a `console.log` format string. Now passed as a `%s` argument. Small, but this repository already treats log forging as real — see the character bound on the correlation id |
+| `detect-non-literal-regexp` in `agent/src/caller.ts` | **Suppressed.** `new RegExp` on a `name` that is a string literal at every call site. Suppressed rather than refactored deliberately: this is the identity parser, its semantics are pinned by an invariant test, and rewriting it to satisfy a taint heuristic is the wrong risk |
+| `detected-generic-secret` in `qrcode.test.ts` | **Suppressed.** The RFC 6238 example base32 secret, published in the spec |
+
+Worth recording for whoever maintains this: a `nosemgrep` directive must sit on the flagged line or the
+line immediately above it, and must carry the **full** rule id including its duplicated final segment
+(`javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp`). A short id or a
+comment two lines up is silently ignored — both were tried and both failed before the placement was
+confirmed by re-running the scan.
+
+### Verified
+
+| Check | Result |
+|---|---|
+| `npm run verify` | Pass, exit 0 — 428 tests |
+| `npm run build` | Pass, exit 0 — agent, BFF and frontend artifacts |
+| `npm run audit` | Pass, exit 0. Also verified to pass in a directory holding only the lockfiles, which is what lets the `audit` job skip installing |
+| `npm run synth` | Pass, exit 0 with **no `.env` and expired credentials** — CDK reports it will synthesize environment-agnostically, which is the intended CI behaviour |
+| Semgrep | Exit **0** after the fixes and suppressions (was exit 1 with 5 findings) |
+| Workflow | Parses; five jobs; `contents: read` at the top and `None` on every job |
+| Action and image pins | All resolve: three action SHAs (HTTP 200), and `ghcr.io/trufflesecurity/trufflehog:3.97.4` exists as a tag — checked, because the action interpolates `version` straight into an image reference and `v3.97.4` would 404 |
+
+### Still depends on GitHub configuration outside the repository
+
+The workflow makes the checks *run*; it cannot make them *required*. Nothing in a repository can.
+
+- **Branch protection or a ruleset** on `main` has to list `verify`, `audit`, `synth`, `secrets` and
+  `sast` as required status checks. Until someone does, a red gate is advisory and a pull request can
+  still be merged.
+- **Actions must be enabled** on the fork, and for a fork of a public repository the first workflow run
+  from an outside contributor needs approval.
+- **Optional, not required:** GitHub's own secret-scanning push protection is a repository setting and
+  is strictly better than a CI job, because it blocks the push instead of reporting after the fact. The
+  `secrets` job is the portable floor, not a replacement.
+- `schedule` triggers only run on the default branch, and GitHub disables them on repositories with no
+  activity for 60 days.
