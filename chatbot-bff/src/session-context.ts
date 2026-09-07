@@ -36,10 +36,12 @@ export function withSessionContext(context: SessionContext, message: string): st
 /**
  * Removes the identity block, recovering the text the user actually typed.
  *
- * The wrapped form is what gets persisted to the session snapshot, so every path that replays a
- * stored conversation — the transcript route, a conversation title — has to undo it. Kept beside
- * `withSessionContext` so the pair cannot drift: a change to the wire format breaks both at once,
- * which is the only way it stays safe to change.
+ * The wrapped form is what the runtime is sent, never what is stored: `agent/src/index.ts` splits the
+ * block off with `parsePrompt` and records the user's own text. So this is defensive on both of its
+ * callers — the transcript projection and `deriveTitle` — and it earns its place by covering a turn
+ * recorded by anything that did not strip it. Kept beside `withSessionContext` so the pair cannot
+ * drift: a change to the wire format breaks both at once, which is the only way it stays safe to
+ * change.
  *
  * A message that carries no block is returned untouched, which covers a turn recorded before this
  * existed and a runtime invoked directly.

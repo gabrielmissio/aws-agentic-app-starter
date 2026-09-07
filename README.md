@@ -128,18 +128,18 @@ that fails at this job: whoever copies this repo to run a pilot is not whoever r
 `cdk synth` fails before a resource is described, naming every violation at once:
 
 ```text
-DEPLOY_PROFILE=pilot refuses 9 sandbox defaults:
+DEPLOY_PROFILE=pilot refuses 10 sandbox defaults:
   - PUBLIC_SIGNUP_ENABLED must be false. Open sign-up lets anyone mint accounts, …
   - COGNITO_MFA must be "required". A password alone is one leaked credential away …
   - GUARDRAIL_ENABLED must be true. Nothing else in this stack inspects what the model …
-  … and six more, each naming its variable and the reason it is refused
+  … and seven more, each naming its variable and the reason it is refused
 ```
 
-Five of the nine are **access posture** — sign-up, CORS origin, alarm subscriber, second factor,
-threat protection. One is **durability**: `RETAIN_DATA`. The last three are **evidence posture** —
-whether a deployment can say what the agent replied, how long it is kept, and which turn a user is
-complaining about. A deployment can satisfy every access rule and still answer none of those three,
-which is why they are gated rather than documented.
+Five of the ten are **access posture** — sign-up, CORS origin, alarm subscriber, second factor,
+threat protection. One is **durability**: `RETAIN_DATA`. The last four are **evidence posture** —
+whether a deployment traces a turn at all, whether the agent's own decisions are recorded, whether
+the spans survive being accepted, and how long any of it is kept. A deployment can satisfy every
+access rule and still answer none of those four, which is why they are gated rather than documented.
 
 ## Local development
 
@@ -194,9 +194,12 @@ calling those rules and reaching no store when they say no, because a rule that 
 and is never consulted protects nothing. `infra/src/__tests__/app.test.ts` does the same for the
 profile gate: `config.test.ts` covers the rules, that file covers `app.ts` actually calling them.
 
-`AgentStack` is never synthesized in `infra/`'s suite — constructing it builds a real Docker image.
-Its invariants are asserted by reading the source instead, which is how the runtime's absent
-authorizer configuration and its narrow ECR grant stay covered; add to that suite the same way.
+`AgentStack` is synthesized in `infra/`'s suite like the other three. It used to be excluded on the
+belief that its `DockerImageAsset` builds the agent image at synth time — it does not: CDK stages the
+build context at synth and builds at *publish* time, so the suite needs no Docker. Its invariants —
+the runtime's absent authorizer configuration, the narrow ECR grant, the single-model Bedrock scope —
+are therefore asserted against the synthesized resource rather than by reading the source, which is
+stronger: a source grep passes on a stack that assigns the property through a variable.
 Rendered React components are not covered, which would need `@testing-library/react` + `jsdom`.
 
 ## Conversations
@@ -265,10 +268,12 @@ It is scaffolding, not a finished product. What is deliberately yours:
   `ACTIVE`. If the deploy fails on a delivery destination, see
   [infra/README.md](infra/README.md#troubleshooting).
 * **There is no CD pipeline.** Deploys run from a developer's machine with ambient credentials, and
-  CI never runs `cdk synth` — constructing `AgentStack` builds the agent image, so a synth in CI
-  would need Docker. The gate itself is covered without one: `infra/src/__tests__/app.test.ts`
-  executes `app.ts` under `pilot` and asserts it refuses, which throws before the first construct.
-  What CI still cannot catch is a template that synthesizes but describes the wrong resource.
+  CI never runs `cdk synth`. That is now a gap rather than a constraint: synth needs no Docker and no
+  credentials — the suite already synthesizes all four stacks — so the missing piece is a job that
+  runs it and compares the result. The gate itself is covered without one:
+  `infra/src/__tests__/app.test.ts` executes `app.ts` under `pilot` and asserts it refuses, which
+  throws before the first construct. What nothing yet catches is a template that synthesizes but
+  describes the wrong resource in a way no assertion names.
 
 Before a pilot with real users: set `DEPLOY_PROFILE=pilot` and fix what it refuses, pin
 `DEPLOY_ACCOUNT`/`DEPLOY_REGION`, turn on `WAF_ENABLED`, and decide what your tools may reach.

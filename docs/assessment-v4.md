@@ -1946,11 +1946,63 @@ The strongest evidence that the foundation is sound is the shape of this assessm
 in *operational maturity* (CD, backups, evaluation, scanning) and *documentation upkeep*, not in
 architecture or security design. That is the profile of a foundation to build on, not one to rebuild.
 
----
-
 *Assessment performed on commit `15e4cd7` by reading the repository and executing its own checks:
 `npm run bootstrap`, `npm run verify` (419 tests, lint, typecheck — all passing), `npm run audit`
 (passing; one low dev-only advisory), and `cdk synth` under three profile configurations (demo:
 success; pilot unpinned: refused; pilot with sandbox defaults: refused with 10 named violations; pilot
 fully configured: success, 119 resources), plus static analysis of the four synthesized CloudFormation
-templates. No AWS resource was created or modified. No prior assessment was consulted.*
+templates. No AWS resource was created or modified. No prior assessment was consulted. Section 20
+records the P0 remediation applied afterwards.*
+
+---
+
+## 20. Addendum — P0 remediation applied
+
+Recorded after the assessment above, which stands as the review of commit `15e4cd7`. The findings are
+left as written; this section states what changed and what was verified, so the document remains an
+audit trail rather than being rewritten in place.
+
+### Applied
+
+| Finding | What changed |
+|---|---|
+| **DOC-05** | The six stale storage comments now name AgentCore Memory and the DynamoDB index: `session.ts` (namespace as `actorId` and index partition key; session id names a conversation, not an S3 prefix), `conversations-handler.ts`, `conversations.ts` (TTL matched to `eventExpiryDuration`, not a bucket lifecycle rule), `session-context.ts`, `agent/Dockerfile` (the `USER node` justification now rests on "nothing writes to disk"). `stripSessionContext`'s comment was additionally *wrong on substance*, not only on naming — it claimed the wrapped form is persisted, when `agent/src/index.ts` records the unwrapped prompt; it now says so and states that both callers are defensive |
+| **DOC-02** | `agent/.env.example`'s telemetry section replaced. `AGENT_OBSERVABILITY_ENABLED` is now documented as the switch, with an explicit note that it is *not* `OTEL_EXPORTER_OTLP_ENDPOINT` and why that gate was retired, plus the four stack-derived variables and the fact that an unset metrics log group makes the exporter a no-op rather than an error |
+| **DOC-01** | `README.md` corrected to 10 and "seven more", and the posture breakdown to 5 access / 1 durability / 4 evidence. `infra/README.md`'s "three gated variables are the evidence half" corrected to four and reworded to name what each answers. Verified by running the gate: its output and the README sample now match line for line |
+| **DOC-03** | `infra/README.md`'s `ALERT_EMAIL` row no longer states a count. Since removing the number lost information, an **Alarms** subsection was added listing all seven with what each fires on, split into the three that fire on an error and the four that fire on failures returning 200 |
+| **DOC-04** | Corrected in `README.md` (both places — the Testing section and the "no CD pipeline" bullet), `CONTRIBUTING.md` and `.github/workflows/ci.yml`. The CD bullet now states that a synth job is an open gap rather than a Docker constraint |
+| **DOC-04 (code)** | Beyond the prose: `AgentStack` is now **constructed and synthesized** in `infra/src/__tests__/stacks.test.ts`. Two invariants moved off source greps onto the synthesized template — *declares no authorizer configuration on the runtime* (the flagship invariant, previously a regex over `agent-stack.ts`) and *scopes the container registry and the log listing to its own resources* — and one assertion was added, *grants the model actions on the scoped ARNs and nothing wider*. New helpers `synthAgentStack()` and `runtimeRoleStatements()` locate the runtime execution role by its trust policy. `readFileSync` is no longer imported. This is the strengthening the finding argued for: a source grep passes on a stack that assigns the property through a variable; the template does not |
+| **TPL-01 (partial)** | All **seven** production comments that reasoned from `docs/assessment.md` now state the reason directly. `grep -rn assessment` over `*.ts`, `*.tsx`, `*.mjs`, `*.yml` outside tests returns nothing |
+| **TPL-02** | Withdrawn as a finding (see above) and the constraint documented: `CONTRIBUTING.md`'s Setup section now records that the root lags on TypeScript because `typescript-eslint` caps at `<6.1.0`, and when to revisit. `package.json` is unchanged — it is JSON and cannot carry the note |
+
+### Not applied — awaiting a decision
+
+**TPL-01's relocation of `docs/assessment.md`.** The finding recommends moving it out of the
+template's default surface, because every fork inherits a review of the upstream repository. That
+recommendation now applies equally to this document, which was placed in `docs/` by request. The two
+cannot be reconciled without a decision on what `docs/` is for:
+
+- If `docs/` is **template documentation a fork keeps**, both assessments should move to release notes,
+  a wiki, or `docs/history/` with a one-line disclaimer.
+- If `docs/` is **the upstream project's own record**, both belong where they are, and the thing worth
+  adding is a line in the root README saying so — that these are reviews of the template itself and not
+  guidance for a fork.
+
+The code-level half of the finding — production comments citing the document — is applied either way,
+and is the half that actually followed a fork into its own codebase.
+
+### Verified after the changes
+
+| Check | Result |
+|---|---|
+| `npm run verify` | **Pass**, exit 0 — lint, typecheck, and **420 tests** (agent 74, bff 132, infra **130**, frontend 84; infra gained the new Bedrock-scope assertion) |
+| `cdk synth`, `DEPLOY_PROFILE=demo` | Success, four stacks |
+| `cdk synth`, `DEPLOY_PROFILE=pilot` with sandbox defaults | Refused with 10 violations, matching the corrected README sample line for line |
+| `AgentStack` synthesized in vitest | Confirmed by a temporary probe before the migration (one `AWS::BedrockAgentCore::Runtime`, ~1.3 s, no image built); probe removed, and the behaviour is now covered by the three migrated/added assertions |
+| `grep -rn assessment` in non-test source | No matches |
+
+### Still open from this plan
+
+P1 in full (bound the agent loop, PITR and deletion protection, CI scanning, the eval set, the prompt
+hash, the `--ignore-scripts` asymmetry), P2 in full, and P3. Nothing in P0 remains except the `docs/`
+decision above.

@@ -833,7 +833,7 @@ export function createObservability(
  * rejects. AgentCore injects no variable carrying the runtime's own identity, so the container
  * cannot derive the name either. Governing the group where it already is reaches the outcome AWS
  * gives as the reason for the unified destination — scoping retention, encryption and access to one
- * agent — without a runtime that rewrites itself on every deploy. See `docs/assessment.md`.
+ * agent — without a runtime that rewrites itself on every deploy.
  *
  * Nothing here deletes the group on `cdk destroy`. It belongs to AgentCore, and a delete ordered
  * before the runtime is gone would simply be recreated, orphaned — the failure mode this template

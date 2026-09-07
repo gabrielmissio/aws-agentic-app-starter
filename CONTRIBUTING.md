@@ -19,6 +19,12 @@ npm run bootstrap
 runs `npm ci` in the root and in all four subpackages, and why `.github/dependabot.yml` names five
 directories. Running `npm ci` in the root alone leaves the subpackages empty.
 
+**The root pins an older TypeScript than the packages, on purpose.** The root exists to run
+`eslint .` across everything, and `typescript-eslint` declares `typescript: >=4.8.4 <6.1.0` — true of
+the current release as well as the pinned one — so the root cannot go past 6.x without breaking the
+lint. The four packages typecheck with 7.x. Raise the root pin only once `typescript-eslint` widens
+that range.
+
 ## The gate
 
 ```bash
@@ -39,8 +45,10 @@ knowing before you add one:
 * **`infra/` asserts security properties against the synthesized template** via
   `aws-cdk-lib/assertions`. A change to an IAM grant, the profile gate or an encryption setting
   belongs there, as an assertion — not only in a README line.
-* **`AgentStack` is never synthesized**, because constructing it builds a real Docker image. Its
-  invariants are asserted by reading the source instead. Add to that suite the same way.
+* **`AgentStack` is synthesized like the other three.** It was once excluded on the belief that its
+  `DockerImageAsset` builds the image at synth time; CDK stages the build context at synth and builds
+  at publish time, so the suite needs no Docker. Assert against the synthesized resource, not the
+  source text — a source grep passes on a stack that assigns the property through a variable.
 
 A change to the deployment-profile gate (`infra/src/config.ts`) needs a test for both directions: the
 value the gate accepts, and the value it refuses.

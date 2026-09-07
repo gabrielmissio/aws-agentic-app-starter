@@ -109,7 +109,7 @@ because a conditional check-and-increment is the only operation the code perform
 | `MEMORY_MAX_MESSAGES` | How much history is replayed into a turn, default `40`. Every turn re-sends its context, so this bounds what a long conversation costs |
 | `APP_URL` | Canonical app URL for the emails. Unset, falls back to what `frontend` published to SSM |
 | `RETAIN_DATA` | `true` (default): the user pool and frontend bucket survive `cdk destroy` |
-| `ALERT_EMAIL` | Subscribes an address to the three CloudWatch alarms and the budget. They fire either way |
+| `ALERT_EMAIL` | Subscribes an address to every CloudWatch alarm and to the budget. The alarms fire either way — without this nobody is notified |
 | `MONTHLY_BUDGET_USD` | Notifies at 80% and 100%. Needs `ALERT_EMAIL`. A budget alerts; it cannot stop spend. Scoped to the **whole account**, not this project — see [.env.example](.env.example) |
 | `API_RATE_LIMIT` / `API_BURST_LIMIT` | Stage throttling, default `10`/`20`. Unset, the stage inherits the account's 10,000 rps |
 | `ALLOWED_ORIGIN` | CORS allowlist, default `*` — the CloudFront URL does not exist on a first deploy. Close it and redeploy `-bff` once it does |
@@ -119,9 +119,29 @@ API Gateway access logs — method, path, status, latency, caller `sub`, never t
 on, in `/aws/apigateway/<project>-chat-api`. Every log group, table and the alarm topic are encrypted
 with the deployment's own KMS key.
 
-The three gated variables above are the *evidence* half of the profile gate: whether a deployment can
-say what the agent replied, for how long it is kept, and which turn a user is complaining about. A
-deployment can satisfy every access rule and still answer none of those.
+The four gated variables above are the *evidence* half of the profile gate: whether a turn is traced at
+all, whether the agent's own decisions are recorded, whether the spans survive being accepted, and how
+long any of it is kept. A deployment can satisfy every access rule and still answer none of those.
+
+### Alarms
+
+Seven, all publishing to the `<project>-alarms` topic. The first three fire on an error; the last four
+fire on the failures that return **200**, which is why they exist — a turn can fail with nothing above
+it looking wrong.
+
+| Alarm | Fires when |
+|---|---|
+| `<project>-chat-errors` | The chat Lambda is failing — users see a broken conversation |
+| `<project>-admin-errors` | The admin Lambda is failing — invites and the user list are broken |
+| `<project>-api-5xx` | The API is returning 5XX — the failure is at or before the integration |
+| `<project>-chat-latency` | p95 turn duration over 45s. Nothing is erroring; users are abandoning the turn |
+| `<project>-agent-throttles` | AgentCore is throttling — the deployment is at a service quota, not broken |
+| `<project>-agent-system-errors` | AgentCore is failing server-side, and the chat Lambda may still answer 200 |
+| `<project>-bedrock-throttles` | Bedrock is throttling model calls — turns fail for capacity, not correctness |
+
+`ALERT_EMAIL` is what puts a subscriber on the topic. `<project>-operations` is the dashboard to open
+next: three rows — what the user got, which layer produced it, what the model was doing — with the
+agent row present only when `AGENT_OBSERVABILITY_ENABLED` put those metrics there.
 
 ## Managing users and admins
 

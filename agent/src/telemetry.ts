@@ -3,8 +3,8 @@
  *
  * The Strands `Agent` already emits spans and metrics — token counts per cycle, per-tool call counts
  * and durations, time to first token — but only once a provider is registered globally. Without this
- * module those instruments exist and write to a no-op provider, which is the state the assessment
- * found: the runtime role holds X-Ray and `PutMetricData` permissions that nothing uses.
+ * module those instruments exist and write to a no-op provider: the runtime role holds X-Ray and
+ * `PutMetricData` permissions that nothing ever uses, and no telemetry leaves the container.
  *
  * **Enabled by `AGENT_OBSERVABILITY_ENABLED`**, the variable AgentCore itself defines for this, and
  * not by `OTEL_EXPORTER_OTLP_ENDPOINT` as it once was. That earlier gate encoded a model AWS has

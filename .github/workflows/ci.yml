@@ -2,10 +2,12 @@ name: CI
 
 # Runs the same checks `npm run verify` (+ `npm run audit`) already run locally before opening a PR
 # — see the root README's "Root scripts" table for what each one does. Nothing here needs AWS
-# credentials: the infra test suite deliberately excludes AgentStack (it builds a real container
-# image at synth time) from its synth-based assertions for exactly that reason, and this workflow
-# inherits the same boundary — a full `cdk synth`/`cdk deploy` is a separate, credentialed concern,
-# not a PR gate.
+# credentials, Docker or a browser: the infra suite synthesizes all four stacks, and CDK stages a
+# container asset's build context at synth rather than building it, so no image is produced.
+#
+# A `cdk deploy` is a separate, credentialed concern and not a PR gate. A `cdk synth` job is not — it
+# needs neither credentials nor Docker, and adding one is the open gap the root README names under
+# "What this template leaves open".
 on:
   push:
     branches: [main]

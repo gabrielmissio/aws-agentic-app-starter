@@ -84,9 +84,9 @@ export const DEFAULT_RETENTION_DAYS = 30
  * time makes the first turn name the conversation and every later turn only bump its recency, which
  * is why no read is needed to decide whether this conversation is new.
  *
- * `expiresAt` is a TTL matched to the bucket's lifecycle rule. Both have to be set from the same
- * retention number or the index outlives the content it points at, and the sidebar fills with
- * conversations that open empty.
+ * `expiresAt` is a TTL matched to `eventExpiryDuration` on the AgentCore Memory resource. Both have to
+ * be set from the same retention number or the index outlives the content it points at, and the
+ * sidebar fills with conversations that open empty.
  */
 export function conversationIndexUpdate(input: {
   tableName: string

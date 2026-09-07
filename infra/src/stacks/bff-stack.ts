@@ -153,8 +153,8 @@ export class BffStack extends cdk.Stack {
       ? {
           AWS_LAMBDA_EXEC_WRAPPER: '/opt/otel-instrument',
           // Tracing without Application Signals. The layer supports both, but Application Signals
-          // is separately billed and its value here is the SLO layer this template deliberately
-          // defers (docs/assessment.md) — so it stays off until someone chooses a target.
+          // is separately billed and what it buys is an SLO layer — and this template declares no
+          // availability or latency target, so it stays off until someone chooses one.
           OTEL_AWS_APPLICATION_SIGNALS_ENABLED: 'false',
         }
       : {}
@@ -551,9 +551,10 @@ export class BffStack extends cdk.Stack {
         evaluationPeriods: 1,
         treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
       }),
-      // Every alarm above fires on an error. These three fire on the failures that return 200:
+      // Every alarm above fires on an error. These four fire on the failures that return 200:
       // a conversation nobody waits for, a runtime refusing work it never reports as broken, and a
-      // model call the service rejects. Each was in the assessment's "still absent" list.
+      // model call the service rejects. Nothing upstream looks wrong while any of them is happening,
+      // which is exactly why they need an alarm of their own.
       new cloudwatch.Alarm(this, 'ChatFunctionLatency', {
         alarmName: `${projectName}-chat-latency`,
         alarmDescription:
@@ -847,9 +848,9 @@ function createDashboard(
 
   if (!agentMetricNamespace) return dashboard
 
-  // Row 3 — what the model was doing. These come from instruments Strands already emitted and
-  // nothing collected: the assessment lists them as absent business metrics, and they were only
-  // ever unexported. Tokens are the cost line; time-to-first-token is what the user calls "slow"
+  // Row 3 — what the model was doing. These come from instruments Strands already emits and that
+  // nothing collected until `agent/src/emf-metrics.ts` exported them, so they were never missing —
+  // only unreachable. Tokens are the cost line; time-to-first-token is what the user calls "slow"
   // even when the total is fine; tool errors are the failure that reaches the answer as a
   // confident wrong one rather than as an error.
   dashboard.addWidgets(
