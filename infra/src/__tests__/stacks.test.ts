@@ -760,6 +760,36 @@ describe('FrontendStack — cache-control split', () => {
   })
 })
 
+describe('FrontendStack — the bucket refuses plaintext', () => {
+  /**
+   * `encryption` covers the object at rest and says nothing about the connection that carried it, and
+   * the two read alike in a diff — which is how a bucket ends up with one and not the other. cdk-nag's
+   * `AwsSolutions-S10` is what surfaced the gap here.
+   *
+   * Asserted through the rendered policy rather than the construct prop, because what protects the
+   * bucket is the `Deny` statement CDK derives from it: a future `addToResourcePolicy` that replaced
+   * the document would satisfy the prop and drop the guarantee.
+   */
+  it('denies any request that did not arrive over TLS', () => {
+    const { template } = synthFrontend()
+
+    const policies = Object.values(template.findResources('AWS::S3::BucketPolicy')) as {
+      Properties: { PolicyDocument: { Statement: Record<string, unknown>[] } }
+    }[]
+
+    const denials = policies
+      .flatMap((policy) => policy.Properties.PolicyDocument.Statement)
+      .filter(
+        (statement) =>
+          statement.Effect === 'Deny' &&
+          JSON.stringify(statement.Condition ?? {}).includes('aws:SecureTransport'),
+      )
+
+    expect(denials).toHaveLength(1)
+    expect(JSON.stringify(denials[0])).toContain('"aws:SecureTransport":"false"')
+  })
+})
+
 describe('FrontendStack — security response headers', () => {
   // Mitigating control for the SPA keeping Cognito tokens in localStorage (see the note in
   // frontend-stack.ts): a strict script-src is what stops an injected <script> from ever running

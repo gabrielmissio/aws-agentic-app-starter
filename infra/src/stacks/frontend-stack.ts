@@ -62,6 +62,14 @@ export class FrontendStack extends cdk.Stack {
       // No `blockPublicAccess`: S3 blocks public access by default, and setting it explicitly needs
       // `s3:PutBucketPublicAccessBlock`, which some SCPs deny. Add it if you want it pinned.
       encryption: s3.BucketEncryption.S3_MANAGED,
+      // Adds a bucket policy denying any request that did not arrive over TLS. `encryption` above
+      // covers the object at rest and says nothing about the connection that carried it.
+      //
+      // Defence in depth rather than a hole being closed: the bucket is private, and CloudFront
+      // reaches it over HTTPS through the OAC below. What this stops is a *later* path — a script,
+      // a console upload, a fork that adds a direct reader — carrying an object in the clear, which
+      // is the kind of thing nobody notices because it works.
+      enforceSSL: true,
       removalPolicy: retainData ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
       // Only safe alongside DESTROY — emptying a bucket you then retain leaves an empty one.
       autoDeleteObjects: !retainData,
