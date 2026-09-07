@@ -8,8 +8,8 @@
     "npm": ">=10.0.0"
   },
   "scripts": {
-    "bootstrap": "npm ci --ignore-scripts && npm --prefix ./agent ci && npm --prefix ./chatbot-bff ci && npm --prefix ./chatbot-frontend ci && npm --prefix ./infra ci",
-    "install:all": "npm install --ignore-scripts && npm --prefix ./agent install && npm --prefix ./chatbot-bff install && npm --prefix ./chatbot-frontend install && npm --prefix ./infra install",
+    "bootstrap": "npm ci --ignore-scripts && npm --prefix ./agent ci --ignore-scripts && npm --prefix ./chatbot-bff ci --ignore-scripts && npm --prefix ./chatbot-frontend ci --ignore-scripts && npm --prefix ./infra ci --ignore-scripts",
+    "install:all": "npm install --ignore-scripts && npm --prefix ./agent install --ignore-scripts && npm --prefix ./chatbot-bff install --ignore-scripts && npm --prefix ./chatbot-frontend install --ignore-scripts && npm --prefix ./infra install --ignore-scripts",
     "install:all:fix": "npm run install:all && npm audit fix && npm --prefix ./agent audit fix && npm --prefix ./chatbot-bff audit fix && npm --prefix ./chatbot-frontend audit fix && npm --prefix ./infra audit fix",
     "typecheck": "npm --prefix ./agent run typecheck && npm --prefix ./chatbot-bff run typecheck && npm --prefix ./infra run typecheck && npm --prefix ./chatbot-frontend run typecheck",
     "test": "npm --prefix ./agent run test && npm --prefix ./chatbot-bff run test && npm --prefix ./infra run test && npm --prefix ./chatbot-frontend run test",

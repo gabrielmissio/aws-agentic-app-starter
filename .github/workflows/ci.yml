@@ -1,9 +1,12 @@
 name: CI
 
-# Runs the same checks `npm run verify` (+ `npm run audit`) already run locally before opening a PR
-# — see the root README's "Root scripts" table for what each one does. Nothing here needs AWS
-# credentials, Docker or a browser: the infra suite synthesizes all four stacks, and CDK stages a
-# container asset's build context at synth rather than building it, so no image is produced.
+# The pull-request gate. Three concerns, deliberately in three jobs so a failure names which one:
+# `verify` is what a contributor already ran locally (see the root README's "Root scripts" table),
+# `secrets` and `sast` are the two checks that cannot be run usefully on a laptop.
+#
+# Nothing here needs AWS credentials, Docker or a browser: the infra suite synthesizes all four
+# stacks, and CDK stages a container asset's build context at synth rather than building it, so no
+# image is produced.
 #
 # A `cdk deploy` is a separate, credentialed concern and not a PR gate. A `cdk synth` job is not — it
 # needs neither credentials nor Docker, and adding one is the open gap the root README names under
@@ -57,3 +60,63 @@ jobs:
       # lets those through while reporting green.
       - name: Audit
         run: npm run audit
+
+  # ── Secret scanning ──────────────────────────────────────────────────────────
+  # `npm audit` says whether a dependency is vulnerable. It says nothing about whether this repository
+  # is carrying a credential, and a secret committed once is leaked even after it is deleted — which is
+  # why this scans history rather than the working tree.
+  #
+  # TruffleHog rather than gitleaks-action, for a reason specific to a template: gitleaks-action
+  # requires a paid `GITLEAKS_LICENSE` for any repository owned by an *organization*, so most forks
+  # that matter would inherit a gate that fails until someone buys a key. This one has no such
+  # condition.
+  secrets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The whole history, because that is the point — a rotated-but-committed key is still in it.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: trufflesecurity/trufflehog@363923b901c911a9164f50b6c423f47c15372b1c # v3.97.4
+        with:
+          path: ./
+          # An empty base is what makes it scan every commit rather than a diff. Left as a diff scan,
+          # the job passes on a secret that arrived before the pull request.
+          base: ''
+          head: HEAD
+          # `verified,unknown` rather than `--only-verified`. Verification proves a credential is live,
+          # so verified-only reports nothing for a key that has already been rotated — and the point of
+          # scanning history is precisely to find those. The cost is false positives; a fork drowning in
+          # them should narrow this rather than delete the job.
+          extra_args: --results=verified,unknown
+
+  # ── Static analysis ──────────────────────────────────────────────────────────
+  # ESLint enforces style and a set of correctness rules; it is not a security analyser. CodeQL is,
+  # and it is the one check here that reasons across files — a tainted value reaching a sink several
+  # calls away is exactly what no lint rule in `eslint.config.mjs` can see.
+  #
+  # `security-extended` rather than the default suite: the default trades recall for precision, and on
+  # a template the cost of a missed injection path is inherited by every fork.
+  sast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      # The only elevated grant in this workflow, and it is what uploads the results to the
+      # repository's Security tab. Scoped to this job rather than raised at the top of the file.
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # No build step and no dependency install: CodeQL analyses JavaScript and TypeScript from source.
+      - uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4
+        with:
+          languages: javascript-typescript
+          queries: security-extended
+
+      - uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4

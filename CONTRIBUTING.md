@@ -19,6 +19,14 @@ npm run bootstrap
 runs `npm ci` in the root and in all four subpackages, and why `.github/dependabot.yml` names five
 directories. Running `npm ci` in the root alone leaves the subpackages empty.
 
+**Every install passes `--ignore-scripts`.** A dependency's lifecycle script is arbitrary code running
+with your shell's privileges, and the same `bootstrap` runs in CI — where the workflow goes to some
+trouble to keep the `GITHUB_TOKEN` out of reach of exactly that (`persist-credentials: false`). It was
+once set on the root install only, which is the one place it mattered least. Nothing here needs a
+postinstall: the only package that has one is `esbuild`, whose platform binary arrives through
+`optionalDependencies`. If you add a dependency that genuinely does, say so in the pull request rather
+than dropping the flag — that is a supply-chain decision every fork inherits.
+
 **The root pins an older TypeScript than the packages, on purpose.** The root exists to run
 `eslint .` across everything, and `typescript-eslint` declares `typescript: >=4.8.4 <6.1.0` — true of
 the current release as well as the pinned one — so the root cannot go past 6.x without breaking the
@@ -32,9 +40,14 @@ npm run verify   # lint, typecheck, test — across every package
 npm run audit    # npm audit --audit-level=high, every package
 ```
 
-Both must pass before you open a pull request. CI runs exactly these two
-(`.github/workflows/ci.yml`), so a green local run is a green CI run — neither needs AWS credentials,
+Both must pass before you open a pull request. CI's `verify` job runs exactly these two
+(`.github/workflows/ci.yml`), so a green local run is a green CI job — neither needs AWS credentials,
 Docker or a browser.
+
+CI adds two jobs you cannot usefully reproduce locally: `secrets` scans the whole git history with
+TruffleHog, and `sast` runs CodeQL. Both can fail a pull request. If `secrets` flags something that is
+not a secret, narrow its `extra_args` in the workflow and say why in the pull request — do not delete
+the job.
 
 ## Tests
 

@@ -163,10 +163,19 @@ validation and a fixed caller id: it exercises the streaming path, not the autho
 | `npm run destroy` | Destroy all stacks |
 | `npm run docker:setup-arm64` | Enable local ARM64 emulation for the agent image build |
 
-`verify` and `audit` are also what CI runs on every push and pull request
-(`.github/workflows/ci.yml`), so the two agree by construction. Nothing there needs AWS credentials.
+`verify` and `audit` are what CI's `verify` job runs on every push and pull request
+(`.github/workflows/ci.yml`), so a green local run and a green CI job agree by construction. Two more
+jobs run there and nowhere else, because neither is useful on a laptop: **`secrets`** scans the full
+git history with TruffleHog — a credential committed once is leaked even after it is deleted — and
+**`sast`** runs CodeQL's `security-extended` queries, which reason across files in a way no lint rule
+can. Nothing in any of the three needs AWS credentials.
 Dependency updates arrive as pull requests from Dependabot (`.github/dependabot.yml`) — the audit
 gate reports what is already vulnerable, and something has to move the versions forward.
+
+Not yet covered: an IaC policy scan. `cdk-nag`'s `AwsSolutionsChecks` currently reports 51 errors
+across this app, most of them the wildcard IAM statements AWS gives no alternative for — each needs an
+evidenced suppression, and a handful are real gaps listed under *What this template leaves open*. It
+is a worthwhile addition and it is not a one-line one.
 
 There is no deploy pipeline: `deploy` runs from your machine against whatever credentials are in the
 shell. Adding one is the first thing a shared environment needs.
