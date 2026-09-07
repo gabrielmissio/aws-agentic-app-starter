@@ -122,9 +122,19 @@ jobs:
       - name: cdk-nag
         run: npm run nag
 
+      # Same guard as `sast`, and it matters more here: a failing `npm run synth` skips the step above,
+      # so without this the job would report a missing-file error next to the synth error that caused
+      # it — and this job's whole contract is that the report never becomes a second failure.
       - name: Report
         if: always()
-        run: jq -r -f .github/cdk-nag-summary.jq infra/cdk.out/cdk-nag.json >> "$GITHUB_STEP_SUMMARY"
+        run: |
+          if [ -f infra/cdk.out/cdk-nag.json ]; then
+            jq -r -f .github/cdk-nag-summary.jq infra/cdk.out/cdk-nag.json >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "## cdk-nag — AwsSolutions" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "No report: the synthesis this reads did not complete." >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       # The canonical copy. A local run reads your `.env` and so scans a different posture — CI has
       # none, which is what makes this report the one two runs can be compared across.
@@ -219,9 +229,19 @@ jobs:
       # Rendered on the run's own summary page, which is where someone looking at a red check already
       # is. This is the half every fork gets whatever its plan: no permission, no paid feature, no
       # account. It also shows what the console cannot — see `.github/semgrep-summary.jq`.
+      # Guarded on the file existing, not just on `always()`. A scan that never produced a report —
+      # the image failed to pull, the registry was unreachable — would otherwise fail this step too,
+      # stacking a confusing `jq` error on top of the real one and burying it.
       - name: Report
         if: always()
-        run: jq -r -f .github/semgrep-summary.jq semgrep.sarif >> "$GITHUB_STEP_SUMMARY"
+        run: |
+          if [ -f semgrep.sarif ]; then
+            jq -r -f .github/semgrep-summary.jq semgrep.sarif >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "## Semgrep" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "The scan produced no report. See the step above for why." >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       # The file itself, for a reviewer who wants it in a SARIF viewer rather than in a table.
       - name: Upload SARIF
