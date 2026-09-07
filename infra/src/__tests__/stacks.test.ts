@@ -2,22 +2,25 @@
  * Synthesized-template assertions for the security and correctness properties this template must not
  * lose — each names the failure it guards against.
  *
- * `AgentStack` is never *constructed* here: its `DockerImageAsset` triggers a real `docker build` at
- * synth time, which a unit-test run must not need. `BffStack` and `FrontendStack` take
- * `agentRuntimeArn` as a plain string, so a stub is enough. The module is still imported — building
- * happens on construction, not on import — so the pure parts of it, like the Bedrock ARN
- * derivation, are tested directly rather than being read off the source.
+ * `AgentStack` **is** constructed and synthesized here. It used to be excluded on the belief that its
+ * `DockerImageAsset` triggers a `docker build` at synth time; it does not — CDK stages the build
+ * context at synth and builds at *publish* time, so a unit-test run needs no Docker. Verified against
+ * this suite: constructing the stack and calling `Template.fromStack` completes in about a second and
+ * produces no image.
+ *
+ * `BffStack` and `FrontendStack` still take `agentRuntimeArn` as a plain string, so a stub is enough
+ * for them and the templates stay readable.
  *
  * `FrontendStack` does need `../chatbot-frontend/dist` on disk: `s3deploy.Source.asset()` reads real
  * files at synth, unlike `lambda.Code.fromAsset()`. `npm run pretest` builds it — run `npx vitest
  * run` directly and the last suite fails with `CannotFindAsset`.
  */
-import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import * as cdk from 'aws-cdk-lib'
 import * as kms from 'aws-cdk-lib/aws-kms'
 import { Match, Template } from 'aws-cdk-lib/assertions'
 import {
+  AgentStack,
   bedrockModelResources,
   createObservability,
   createTelemetryDeliveries,
@@ -81,6 +84,57 @@ function synthAuth(props: Partial<ConstructorParameters<typeof AuthStack>[2]> = 
   const app = new cdk.App()
   const stack = new AuthStack(app, 'TestAuth', { projectName: 'test', env, ...props })
   return { stack, template: Template.fromStack(stack) }
+}
+
+/** A statement's actions, whichever shape CloudFormation rendered them in. */
+function asArray(value: string | string[] | undefined): string[] {
+  return value === undefined ? [] : Array.isArray(value) ? value : [value]
+}
+
+/**
+ * The full agent stack, synthesized. Every posture on, so the grants that only exist with the
+ * guardrail and with observability are covered too.
+ *
+ * Constructing this needs no Docker: `DockerImageAsset` stages the build context at synth and the
+ * image is built at publish time — see the note at the top of this file.
+ */
+function synthAgentStack(): Template {
+  const app = new cdk.App()
+  const stack = new AgentStack(app, 'TestAgent', {
+    projectName: 'test',
+    modelId: 'us.anthropic.claude-sonnet-5',
+    conversationRetentionDays: 30,
+    guardrailEnabled: true,
+    agentObservabilityEnabled: true,
+    env,
+  })
+  return Template.fromStack(stack)
+}
+
+/** The runtime execution role's inline statements — the grant surface a compromised container has. */
+function runtimeRoleStatements(template: Template): PolicyStatement[] {
+  const roles = Object.values(
+    template.findResources('AWS::IAM::Role', {
+      Properties: {
+        AssumeRolePolicyDocument: Match.objectLike({
+          Statement: Match.arrayWith([
+            Match.objectLike({
+              Principal: { Service: 'bedrock-agentcore.amazonaws.com' },
+            }),
+          ]),
+        }),
+      },
+    }),
+  )
+  expect(roles).toHaveLength(1)
+
+  const policies = (roles[0].Properties.Policies ?? []) as {
+    PolicyDocument?: { Statement?: PolicyStatement[] }
+  }[]
+  const statements = policies.flatMap((policy) => policy.PolicyDocument?.Statement ?? [])
+  expect(statements.length).toBeGreaterThan(0)
+
+  return statements
 }
 
 describe('AuthStack — the browser gets a token and nothing else', () => {
@@ -806,24 +860,30 @@ describe('the runtime is reachable over SigV4 and nothing else', () => {
    *
    * Adding a JWT authorizer would give the browser a direct path, and the identity block the agent
    * trusts is plain text: any signed-in user could then compose one naming another user's `sub`.
-   * Read off the source rather than the synthesized template because constructing `AgentStack`
-   * triggers a real `docker build` — see the note at the top of this file.
+   *
+   * Asserted against the synthesized resource, not the source text. A source grep passes on a stack
+   * that assigns the property through a variable or a spread; the template shows what CloudFormation
+   * would actually be given.
    */
   it('declares no authorizer configuration on the runtime', () => {
-    const source = readFileSync(new URL('../stacks/agent-stack.ts', import.meta.url), 'utf8')
+    const runtimes = Object.values(
+      synthAgentStack().findResources('AWS::BedrockAgentCore::Runtime'),
+    )
 
-    // A property assignment, not the comment that explains the absence — hence the line anchor.
-    expect(source).not.toMatch(/^\s*authorizerConfiguration\s*:/m)
-    // The only thing that configuration can carry, in case it ever arrives spread or aliased.
-    expect(source).not.toContain('customJwtAuthorizer')
+    expect(runtimes).toHaveLength(1)
+    for (const runtime of runtimes) {
+      expect(runtime.Properties).not.toHaveProperty('AuthorizerConfiguration')
+      // The only thing that configuration can carry, in case it ever arrives under another shape.
+      expect(JSON.stringify(runtime.Properties)).not.toContain('CustomJWTAuthorizer')
+    }
   })
 })
 
 describe('the agent may invoke one model, not every model', () => {
   /**
-   * `AgentStack` builds a real container image at synth, so it is not constructed here — the ARN
-   * derivation is exported and tested directly, and the rest is read off the source, matching the
-   * approach already used for the identity-key assertion above.
+   * The ARN derivation is exported and exercised as a pure function, because the two shapes it has to
+   * produce are the whole point and a template assertion would only show the result for one model id.
+   * The grant that consumes it is asserted against the synthesized policy below.
    */
   const scope = { partition: 'aws', account: '123456789012' }
 
@@ -856,21 +916,39 @@ describe('the agent may invoke one model, not every model', () => {
   })
 
   it('scopes the container registry and the log listing to its own resources', () => {
-    const source = readFileSync(new URL('../stacks/agent-stack.ts', import.meta.url), 'utf8')
+    const statements = runtimeRoleStatements(synthAgentStack())
 
-    // A wildcard ECR grant let a compromised container read every image in the account; an
-    // account-wide DescribeLogGroups is a listing of every workload in it.
-    expect(source).toContain('imageAsset.repository.repositoryArn')
-    expect(source).not.toContain("resource: 'repository', resourceName: '*'")
-    const describeBlock = source.slice(source.indexOf("sid: 'DescribeLogGroups'"))
-    expect(describeBlock.slice(0, 600)).toContain('/aws/bedrock-agentcore/runtimes/*')
+    // A wildcard ECR grant let a compromised container read every image in the account.
+    const ecrPull = statements.find((statement) =>
+      asArray(statement.Action).includes('ecr:BatchGetImage'),
+    )
+    expect(ecrPull).toBeDefined()
+    expect(JSON.stringify(ecrPull?.Resource)).not.toContain('"*"')
+
+    // An account-wide DescribeLogGroups is a listing of every workload in the account.
+    const describe = statements.find((statement) =>
+      asArray(statement.Action).includes('logs:DescribeLogGroups'),
+    )
+    expect(JSON.stringify(describe?.Resource)).toContain('/aws/bedrock-agentcore/runtimes/*')
+  })
+
+  it('grants the model actions on the scoped ARNs and nothing wider', () => {
+    const model = runtimeRoleStatements(synthAgentStack()).find((statement) =>
+      asArray(statement.Action).includes('bedrock:InvokeModel'),
+    )
+
+    expect(model).toBeDefined()
+    expect(JSON.stringify(model?.Resource)).not.toContain('foundation-model/*')
+    expect(JSON.stringify(model?.Resource)).toContain('anthropic.claude-sonnet-5')
   })
 })
 
 /**
- * `AgentStack` itself cannot be constructed here — see the note at the top of this file — so the
- * observability wiring is synthesized on its own, into a bare stack, the same way
- * `bedrockModelResources` is exercised as a pure function.
+ * The observability wiring is synthesized on its own, into a bare stack, rather than through
+ * `AgentStack`. Not because the stack cannot be constructed — it can, see `synthAgentStack` — but
+ * because these assertions need to vary the retention and check what the helpers produce in
+ * isolation, and a bare stack keeps the logical ids and the template small enough to assert against
+ * precisely.
  */
 describe('AgentStack — agent telemetry', () => {
   const RUNTIME_ARN = 'arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/test-aBcDeF1234'
