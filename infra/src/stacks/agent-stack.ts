@@ -9,6 +9,26 @@ import * as cr from 'aws-cdk-lib/custom-resources'
 import { Construct } from 'constructs'
 import { fileURLToPath } from 'node:url'
 
+/**
+ * The runtime's name, and the first half of the `Name` dimension on every `AWS/Bedrock-AgentCore`
+ * metric it publishes — the service spells that dimension `<name>::<endpoint>`.
+ *
+ * Exported because `BffStack` alarms on those metrics and would otherwise carry its own copy of the
+ * rule. That is not a hypothetical: the alarms were written against a dimension the service does not
+ * publish at all, and a dimension nothing writes to produces an alarm that never receives a
+ * datapoint and therefore never leaves `OK`. A name the two stacks derive from one function can
+ * still be wrong, but it can no longer be wrong in only one of them.
+ */
+export function agentRuntimeName(projectName: string): string {
+  return projectName.replaceAll('-', '_')
+}
+
+/**
+ * The endpoint AgentCore gives a runtime that declares none, and the second half of that dimension.
+ * `governRuntimeLogGroup` derives the runtime's log group name from the same fact.
+ */
+export const AGENT_RUNTIME_ENDPOINT = 'DEFAULT'
+
 export interface AgentStackProps extends cdk.StackProps {
   projectName: string
   imagePlatform?: ecrassets.Platform
@@ -373,7 +393,7 @@ export class AgentStack extends cdk.Stack {
     // what bounds what a compromised container can reach.
 
     const runtime = new bedrockagentcore.CfnRuntime(this, 'AgentRuntime', {
-      agentRuntimeName: projectName.replaceAll('-', '_'),
+      agentRuntimeName: agentRuntimeName(projectName),
       description: `AgentCore runtime for ${projectName}`,
       roleArn: runtimeRole.roleArn,
       agentRuntimeArtifact: {
@@ -852,8 +872,9 @@ export function governRuntimeLogGroup(
   const { projectName, runtimeId, encryptionKey, retentionDays, findingsLogGroupName } = options
   const stack = cdk.Stack.of(scope)
 
-  // `DEFAULT` is the endpoint name, and the only endpoint this stack creates.
-  const logGroupName = `/aws/bedrock-agentcore/runtimes/${runtimeId}-DEFAULT`
+  // `DEFAULT` is the endpoint name, and the only endpoint this stack creates. The same fact names
+  // the `Name` dimension the BFF's alarms carry, which is why it is a shared constant.
+  const logGroupName = `/aws/bedrock-agentcore/runtimes/${runtimeId}-${AGENT_RUNTIME_ENDPOINT}`
   const logGroupArn = stack.formatArn({
     service: 'logs',
     resource: 'log-group',

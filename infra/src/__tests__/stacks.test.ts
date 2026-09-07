@@ -1230,6 +1230,52 @@ describe('BffStack — operational visibility', () => {
     }
   })
 
+  /**
+   * An alarm on a dimension the service does not publish never receives a datapoint, and
+   * `treatMissingData: NOT_BREACHING` then holds it in `OK` for the life of the deployment. It is
+   * the worst way for an alarm to be wrong: visibly present, permanently green, monitoring nothing.
+   *
+   * Both AgentCore alarms were in exactly that state, on a single `AgentRuntimeName` dimension that
+   * appears under no `AWS/Bedrock-AgentCore` metric. Nothing here could have caught it — the synth
+   * rendered the wrong dimension faithfully and every assertion in this file agreed with it. So this
+   * test asserts the *shape* the service documents, which is the part a reader can check against
+   * `aws cloudwatch list-metrics` without deploying anything.
+   */
+  it('dimensions the AgentCore alarms the way AgentCore publishes them', () => {
+    const template = synthBff()
+
+    const alarms = Object.values(template.findResources('AWS::CloudWatch::Alarm')).filter(
+      (alarm) => (alarm.Properties as { Namespace?: string }).Namespace === 'AWS/Bedrock-AgentCore',
+    )
+    expect(alarms).toHaveLength(2)
+
+    for (const alarm of alarms) {
+      const dimensions = (alarm.Properties as { Dimensions?: { Name: string; Value: string }[] })
+        .Dimensions
+
+      // `Name` is `<runtime>::<endpoint>`, not the runtime name alone — the endpoint half is what
+      // `AgentStack` also derives its log group name from.
+      expect(dimensions).toEqual(
+        expect.arrayContaining([
+          { Name: 'Name', Value: 'test::DEFAULT' },
+          { Name: 'Operation', Value: 'InvokeAgentRuntime' },
+          { Name: 'Resource', Value: FAKE_RUNTIME_ARN },
+        ]),
+      )
+      expect(dimensions).toHaveLength(3)
+    }
+  })
+
+  /**
+   * Stated as an absence over the whole template rather than per alarm, so a future alarm cannot
+   * reintroduce the dimension somewhere this file does not look.
+   */
+  it('carries no dimension AgentCore does not publish', () => {
+    const body = JSON.stringify(synthBff().findResources('AWS::CloudWatch::Alarm'))
+
+    expect(body).not.toContain('AgentRuntimeName')
+  })
+
   /** Every alarm has to reach the topic; one that only changes colour on a page nobody has open is not an alarm. */
   it('routes every alarm to the notification topic', () => {
     const template = synthBff()
@@ -1251,6 +1297,33 @@ describe('BffStack — operational visibility', () => {
     // The token and tool metrics the assessment lists as absent — present once the agent exports them.
     expect(body).toContain('GenAiAgentTokensInput')
     expect(body).toContain('GenAiAgentToolErrorCount')
+    // The runtime row, on the dimensions the service publishes rather than on the one it does not.
+    expect(body).toContain('test::DEFAULT')
+    expect(body).not.toContain('AgentRuntimeName')
+  })
+
+  /**
+   * A widget is not evidence that a number exists. Three of these charted names that nothing writes,
+   * and each rendered as a flat zero — which reads as a healthy quiet system rather than as a metric
+   * that was never produced. That is a worse outcome than no widget, and it is why `agentMetric`
+   * now takes a union of the names the agent actually exports instead of a `string`.
+   */
+  it('charts no metric name nothing publishes', () => {
+    const body = JSON.stringify(
+      Object.values(synthBff().findResources('AWS::CloudWatch::Dashboard'))[0]?.Properties,
+    )
+
+    // Strands emits no time-to-first-token instrument, so this name resolved to nothing. The number
+    // is real in `AWS/Bedrock`, and that is where the widget reads it from now.
+    expect(body).not.toContain('GenAiServerTimeToFirstToken')
+    expect(body).toContain('TimeToFirstToken')
+
+    // `Sessions` is the metric; `SessionCount` is not one, and was an empty axis for the same reason.
+    expect(body).not.toContain('SessionCount')
+    expect(body).toContain('Sessions')
+
+    // The guardrail is the only layer that reads what is said, and nothing counted it acting.
+    expect(body).toContain('GenAiAgentGuardedCount')
   })
 
   /**

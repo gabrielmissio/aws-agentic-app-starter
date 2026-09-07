@@ -14,6 +14,7 @@ import * as wafv2 from 'aws-cdk-lib/aws-wafv2'
 import * as subscriptions from 'aws-cdk-lib/aws-sns-subscriptions'
 import { Construct } from 'constructs'
 import { ADMIN_GROUP_NAME } from './auth-stack.js'
+import { AGENT_RUNTIME_ENDPOINT, agentRuntimeName } from './agent-stack.js'
 import { DEFAULT_USER_RATE_LIMIT, type ApiThrottle, type UserRateLimit } from '../config.js'
 
 export interface BffStackProps extends cdk.StackProps {
@@ -578,7 +579,7 @@ export class BffStack extends cdk.Stack {
         alarmName: `${projectName}-agent-throttles`,
         alarmDescription:
           'AgentCore is throttling invocations — the deployment is at a service quota, not broken.',
-        metric: agentRuntimeMetric('Throttles', projectName),
+        metric: agentRuntimeMetric('Throttles', projectName, agentRuntimeArn),
         threshold: 1,
         evaluationPeriods: 1,
         treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
@@ -587,7 +588,7 @@ export class BffStack extends cdk.Stack {
         alarmName: `${projectName}-agent-system-errors`,
         alarmDescription:
           'AgentCore is failing server-side. The chat Lambda may still be answering 200 with a failed turn.',
-        metric: agentRuntimeMetric('SystemErrors', projectName),
+        metric: agentRuntimeMetric('SystemErrors', projectName, agentRuntimeArn),
         threshold: 1,
         evaluationPeriods: 1,
         treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
@@ -622,6 +623,7 @@ export class BffStack extends cdk.Stack {
       api,
       chatFunction: fn,
       modelId,
+      agentRuntimeArn,
       agentMetricNamespace,
     })
 
@@ -735,22 +737,75 @@ function attachWebAcl(scope: Construct, projectName: string, api: apigateway.Res
 }
 
 /**
- * One AgentCore runtime metric.
+ * One AgentCore runtime metric, on the dimensions AgentCore actually publishes.
  *
- * AgentCore dimensions these by the runtime's *name*, not its ARN — and `AgentStack` builds that
- * name from the project name with hyphens replaced, so the same transformation has to happen here.
- * Written as a helper rather than inlined four times because getting that transformation wrong
- * produces an alarm that never fires, which looks exactly like an alarm that never needed to.
+ * This comment used to open by asserting that AgentCore dimensions these "by the runtime's *name*,
+ * not its ARN". It publishes them by both, and by the operation as well: `Name` is
+ * `<runtime>::<endpoint>`, `Operation` is `InvokeAgentRuntime`, `Resource` is the runtime ARN. The
+ * stack carried a single `AgentRuntimeName` dimension instead, which appears under no metric in the
+ * namespace — so both agent alarms received no datapoint from the first deploy, and
+ * `treatMissingData: NOT_BREACHING` held them in `OK` for the life of the deployment. An alarm that
+ * is wrong and green is worse than no alarm, which is at least visibly absent.
+ *
+ * Worth being precise about why it survived review: nothing in a synth can catch it. The template
+ * renders the wrong dimension perfectly and every test in `stacks.test.ts` agrees with it, because
+ * those tests assert on what CDK rendered rather than on what CloudWatch holds. Only the account
+ * knows. The settling command is
+ *
+ *   aws cloudwatch list-metrics --namespace AWS/Bedrock-AgentCore
+ *
+ * and the test that guards this now asserts the dimension *shape* AWS documents, which is the part
+ * a reader can check against that output without deploying anything.
  */
-function agentRuntimeMetric(metricName: string, projectName: string): cloudwatch.Metric {
+function agentRuntimeMetric(
+  metricName: string,
+  projectName: string,
+  agentRuntimeArn: string,
+): cloudwatch.Metric {
   return new cloudwatch.Metric({
     namespace: 'AWS/Bedrock-AgentCore',
     metricName,
-    dimensionsMap: { AgentRuntimeName: projectName.replaceAll('-', '_') },
+    // The endpoint half of `Name` and the ARN both come from `AgentStack`, so a runtime renamed
+    // there moves this with it rather than leaving the alarm pointed at a name nothing publishes.
+    dimensionsMap: {
+      Name: `${agentRuntimeName(projectName)}::${AGENT_RUNTIME_ENDPOINT}`,
+      Operation: 'InvokeAgentRuntime',
+      Resource: agentRuntimeArn,
+    },
     period: cdk.Duration.minutes(5),
     statistic: 'Sum',
   })
 }
+
+/**
+ * Every metric name `agent/src/emf-metrics.ts` can put in the agent's namespace.
+ *
+ * Hand-kept, and deliberately so: the two packages cannot import each other, so this is one half of
+ * a contract whose other half is the agent's own instruments — the same arrangement as the identity
+ * wire format, and paired the same way, by a test on each side (`emf-metrics.test.ts` asserts what
+ * the exporter produces these names from). What it buys is that `agentMetric` below takes this
+ * union rather than a `string`, so charting a metric nothing publishes stops being a widget that
+ * renders flat zero and becomes a compile error.
+ *
+ * That is not hypothetical. `GenAiServerTimeToFirstToken` was charted here for exactly as long as
+ * this type did not exist; Strands emits no such instrument, and an empty widget reads as a model
+ * that answers instantly. Time to first token now comes from `AWS/Bedrock`, which does publish it.
+ *
+ * Two of these appear only once the condition they count occurs — a tool has to fail before
+ * `ToolErrorCount` exists, and a guardrail has to intervene before `GuardedCount` does. That is a
+ * counter behaving correctly, not the absence this type guards against.
+ */
+type AgentMetricName =
+  | 'GenAiAgentTokensInput'
+  | 'GenAiAgentTokensOutput'
+  | 'GenAiAgentModelLatency'
+  | 'GenAiAgentCycleDuration'
+  | 'GenAiAgentCycleCount'
+  | 'GenAiAgentInvocationCount'
+  | 'GenAiAgentToolCallCount'
+  | 'GenAiAgentToolErrorCount'
+  | 'GenAiAgentToolDuration'
+  | 'GenAiAgentGuardedCount'
 
 /**
  * The operational dashboard.
@@ -769,13 +824,14 @@ function createDashboard(
     api: apigateway.RestApi
     chatFunction: lambda.Function
     modelId: string
+    agentRuntimeArn: string
     agentMetricNamespace?: string
   },
 ): cloudwatch.Dashboard {
-  const { projectName, api, chatFunction, modelId, agentMetricNamespace } = options
+  const { projectName, api, chatFunction, modelId, agentRuntimeArn, agentMetricNamespace } = options
   const period = cdk.Duration.minutes(5)
 
-  const agentMetric = (metricName: string, statistic: string) =>
+  const agentMetric = (metricName: AgentMetricName, statistic: string) =>
     new cloudwatch.Metric({
       namespace: agentMetricNamespace ?? '',
       metricName,
@@ -815,12 +871,14 @@ function createDashboard(
       title: 'AgentCore runtime',
       width: 12,
       left: [
-        agentRuntimeMetric('Invocations', projectName),
-        agentRuntimeMetric('Throttles', projectName),
-        agentRuntimeMetric('SystemErrors', projectName),
-        agentRuntimeMetric('UserErrors', projectName),
+        agentRuntimeMetric('Invocations', projectName, agentRuntimeArn),
+        agentRuntimeMetric('Throttles', projectName, agentRuntimeArn),
+        agentRuntimeMetric('SystemErrors', projectName, agentRuntimeArn),
+        agentRuntimeMetric('UserErrors', projectName, agentRuntimeArn),
       ],
-      right: [agentRuntimeMetric('SessionCount', projectName)],
+      // `Sessions`, not `SessionCount` — the latter is not a metric AgentCore publishes, so this
+      // axis was empty for the same reason the dimension above made the whole widget empty.
+      right: [agentRuntimeMetric('Sessions', projectName, agentRuntimeArn)],
     }),
     new cloudwatch.GraphWidget({
       title: 'Bedrock model',
@@ -849,42 +907,71 @@ function createDashboard(
           period,
           statistic: 'p95',
         }),
+        // Time to first token is what a user calls "slow" even when the total is fine, and Bedrock
+        // publishes it per model. It sits here rather than in the agent row below because it is the
+        // service's own measurement: charting it here means it survives `AGENT_OBSERVABILITY_ENABLED`
+        // being off, and it does not depend on an instrument the agent SDK may or may not emit.
+        //
+        // It was previously charted below as `GenAiServerTimeToFirstToken`, from the agent's own
+        // metrics — a name nothing writes. Strands emits no time-to-first-token instrument, so that
+        // widget rendered empty and read as "the model answers instantly".
+        new cloudwatch.Metric({
+          namespace: 'AWS/Bedrock',
+          metricName: 'TimeToFirstToken',
+          dimensionsMap: { ModelId: modelId },
+          period,
+          statistic: 'p95',
+        }),
       ],
     }),
   )
 
   if (!agentMetricNamespace) return dashboard
 
-  // Row 3 — what the model was doing. These come from instruments Strands already emits and that
-  // nothing collected until `agent/src/emf-metrics.ts` exported them, so they were never missing —
-  // only unreachable. Tokens are the cost line; time-to-first-token is what the user calls "slow"
-  // even when the total is fine; tool errors are the failure that reaches the answer as a
-  // confident wrong one rather than as an error.
+  // Row 3 — what the model was doing. Every metric here is named by `AgentMetricName`, which is the
+  // whole discipline of this row: a widget
+  // charting a name nothing writes renders as a flat zero, and a flat zero reads as "quiet" rather
+  // than "never wired up". Tokens are the cost line; the gap between model latency and cycle
+  // duration is the loop's own overhead; tool errors are the failure that reaches the user as a
+  // confident wrong answer rather than as an error; a guarded turn is the one that returns 200 with
+  // content the guardrail rewrote.
   dashboard.addWidgets(
     new cloudwatch.GraphWidget({
       title: 'Tokens',
-      width: 8,
+      width: 6,
       left: [
         agentMetric('GenAiAgentTokensInput', 'Sum'),
         agentMetric('GenAiAgentTokensOutput', 'Sum'),
       ],
     }),
     new cloudwatch.GraphWidget({
-      title: 'Time to first token / model latency',
-      width: 8,
+      title: 'Model latency and loop time',
+      width: 6,
+      // Charted together because the distance between them is the only view of what the agent loop
+      // spends outside the model — tool calls and the memory read. Time to first token used to be
+      // the second series here and now sits in the Bedrock widget above, where the number is real.
       left: [
-        agentMetric('GenAiServerTimeToFirstToken', 'Average'),
         agentMetric('GenAiAgentModelLatency', 'Average'),
+        agentMetric('GenAiAgentCycleDuration', 'Average'),
       ],
     }),
     new cloudwatch.GraphWidget({
       title: 'Tool calls and errors',
-      width: 8,
+      width: 6,
       left: [
         agentMetric('GenAiAgentToolCallCount', 'Sum'),
         agentMetric('GenAiAgentToolErrorCount', 'Sum'),
       ],
       right: [agentMetric('GenAiAgentToolDuration', 'Average')],
+    }),
+    new cloudwatch.GraphWidget({
+      title: 'Turns a content control ended',
+      width: 6,
+      // The guardrail is the one layer that reads what is said, and until `agent/src/index.ts`
+      // counted this nothing recorded that it had acted: an intervention ends the turn with a
+      // normal stop reason, so it returns 200 and looks like an ordinary answer. A deployment could
+      // not answer "how often did the guardrail fire this week" at all.
+      left: [agentMetric('GenAiAgentGuardedCount', 'Sum')],
     }),
   )
 
