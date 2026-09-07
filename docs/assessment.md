@@ -516,6 +516,40 @@ were called absent turn out to have been emitted by Strands all along and merely
 | A declared SLO | **still absent** — see the deferred items below |
 | Client-side (RUM) telemetry | **still absent** — see the deferred items below |
 
+**Decision — what the masking policy covers, and what it deliberately does not.**
+
+The policy masks six managed identifiers: `EmailAddress`, `CreditCardNumber`, `Ssn-US`,
+`CpfCode-BR`, `AwsSecretKey`, `OpenSshPrivateKey`. It began with ten, and the account showed the
+cost of the other four:
+
+- Ordinary Portuguese prose came back as `"pode me ********** pergunta real"`.
+- The bind address `0.0.0.0` was masked as an IP address.
+- The span attribute whose values are `LLM` and `AGENT` arrived with its **name** masked, in six of
+  nine spans — the attribute the GenAI Observability console reads to distinguish an LLM span from a
+  tool span. Masking that makes a console attribute unparseable protects nothing.
+
+`Name` and `Address` are matched against free text, and agent logs are nothing but free text. AWS
+states the general form of this: *"Choosing many types of data can lead to false positives."*
+
+The first attempt kept all ten under `Audit` and masked only six under `Deidentify`. **The service
+refuses that**: the `Deidentify` array must exactly match the `Audit` array, and the deploy fails
+with *"Audit Statement and Deidentify Statement must have the same Data Identifiers"*. Detection and
+masking are one decision, not two — worth knowing before designing around a split that cannot exist.
+
+**Residual risk, accepted knowingly.** Personal names, postal addresses, phone numbers and IP
+addresses appearing in a conversation are neither masked nor detected in the log groups. What still
+covers them:
+
+- the Bedrock guardrail on the model path, which is where a prompt and completion are filtered;
+- `span-redaction.ts`, which redacts tool arguments and results at the source — the path where
+  `get_signed_in_user` returns the caller's name and email;
+- `logs:Unmask` being granted to nobody, so what *is* masked stays masked.
+
+A fork whose traffic carries personal names in the prompt itself should weigh adding `NAME` back,
+knowing it will also mask prose, or write a custom data identifier scoped to its own format. The
+findings destination (`/aws/vendedlogs/bedrock-agentcore/<project>-findings`) exists so that call is
+made on evidence rather than on a guess.
+
 **Decision — where the agent's logs live, and why not the unified span destination.**
 
 Since 2026-07-20 AgentCore delivers spans, prompts, structured logs and stdout to a single per-agent

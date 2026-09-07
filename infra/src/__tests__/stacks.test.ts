@@ -911,9 +911,11 @@ describe('AgentStack — agent telemetry', () => {
     )
     const policy = JSON.stringify(telemetry?.Properties)
 
-    for (const identifier of ['EmailAddress', 'Name', 'CreditCardNumber', 'AwsSecretKey']) {
+    for (const identifier of ['EmailAddress', 'CreditCardNumber', 'AwsSecretKey', 'CpfCode-BR']) {
       expect(policy).toContain(identifier)
     }
+    // `Name` is deliberately absent — it matched prose. See the note on MASKED_IDENTIFIERS.
+    expect(policy).not.toContain('data-identifier/Name')
   })
 
   /**
@@ -1293,25 +1295,30 @@ describe('AgentStack — the runtime\'s own log group', () => {
   })
 
   /**
-   * The audit/mask split, asserted on the document this group actually receives.
+   * The two statements must carry identical identifier lists, and the list must stay short.
    *
-   * Masking all ten on write turned ordinary prose into asterisks and masked the *name* of the span
-   * attribute the GenAI console reads. Auditing stays wide so nothing goes undetected; masking is
-   * narrowed to identifiers with a verifiable structure. Reverting this quietly re-breaks the logs.
+   * Both halves were learned the hard way. Masking all ten managed identifiers turned ordinary prose
+   * into asterisks and masked the *name* of the span attribute the GenAI console reads. The obvious
+   * fix — audit widely, mask narrowly — is refused by the service: "Audit Statement and Deidentify
+   * Statement must have the same Data Identifiers". So detection and masking are one decision, and
+   * the only lever is which identifiers are precise enough to be worth both.
    */
-  it('audits more identifiers than it masks', () => {
+  it('masks only identifiers with a verifiable structure, and audits exactly those', () => {
     const { Statement } = maskingPolicyOf(synthGoverned())
     const names = (sid: string) =>
       (Statement.find((statement) => statement.Sid === sid)?.DataIdentifier ?? []).map((arn) =>
         arn.slice(arn.lastIndexOf('/') + 1),
       )
 
-    for (const noisy of ['Name', 'Address', 'PhoneNumber-US', 'IpAddress']) {
-      expect(names('audit')).toContain(noisy)
-      expect(names('redact')).not.toContain(noisy)
-    }
+    // The service rejects the policy outright if these differ.
+    expect(names('audit')).toEqual(names('redact'))
+
     for (const precise of ['EmailAddress', 'CreditCardNumber', 'CpfCode-BR', 'AwsSecretKey']) {
       expect(names('redact')).toContain(precise)
+    }
+    // The four that matched free text and a bind address. Re-adding one re-breaks the logs.
+    for (const noisy of ['Name', 'Address', 'PhoneNumber-US', 'IpAddress']) {
+      expect(names('redact')).not.toContain(noisy)
     }
   })
 

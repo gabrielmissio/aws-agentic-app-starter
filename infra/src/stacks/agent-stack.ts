@@ -633,43 +633,31 @@ export function bedrockModelResources(
 }
 
 /**
- * What CloudWatch Logs looks for, and the narrower set it actually masks.
+ * The data CloudWatch Logs detects and masks on write, in both of this agent's log groups.
  *
- * **Why two lists.** The first deployment masked all ten on write, and the account showed what that
- * costs: ordinary Portuguese prose came back as `"pode me ********** pergunta real"` and
- * `"alguma ********** ferramentas"`, the bind address `0.0.0.0` was masked as an IP address, and —
- * worst — the span attribute whose values are `LLM` and `AGENT` arrived as `aws.**********_kind` in
- * six of nine spans, its *name* masked. (Which identifier fired is not knowable from here: reading
- * it back needs `logs:Unmask`, which this template grants to no one, and the audit statement had no
- * findings destination — the second of which is fixed below.) `Name` and
- * `Address` are pattern-matched against free text, and agent logs are nothing but free text, so they
- * fire constantly. Masking that hides no personal data while making a log unreadable and a console
- * attribute unparseable is a net loss, not a conservative default.
+ * **Why this list is short.** The first version carried all ten managed identifiers, and the account
+ * showed what that costs: ordinary Portuguese prose came back as `"pode me ********** pergunta
+ * real"`, the bind address `0.0.0.0` was masked as an IP address, and the span attribute whose
+ * values are `LLM` and `AGENT` arrived with its *name* masked, in six of nine spans — that attribute
+ * being what the GenAI Observability console reads to tell an LLM span from a tool span. `Name` and
+ * `Address` are matched against free text, and agent logs are nothing but free text. AWS says the
+ * same thing in the abstract: *"Choosing many types of data can lead to false positives."*
  *
- * **What replaces it.** Everything is still *audited*, so nothing stops being detected and the
- * findings say exactly what would have been masked. Only identifiers with a checkable structure —
- * an email, a card, an SSN, a CPF, a key — are masked on write. A fork that finds real names leaking
- * in its own traffic promotes `NAME` into the masked list from evidence in the findings log group,
- * rather than inheriting a default that already proved noisy here.
- */
-const AUDITED_IDENTIFIERS = [
-  logs.DataIdentifier.EMAILADDRESS,
-  logs.DataIdentifier.NAME,
-  logs.DataIdentifier.ADDRESS,
-  logs.DataIdentifier.PHONENUMBER_US,
-  logs.DataIdentifier.CREDITCARDNUMBER,
-  logs.DataIdentifier.SSN_US,
-  logs.DataIdentifier.CPFCODE_BR,
-  logs.DataIdentifier.AWSSECRETKEY,
-  logs.DataIdentifier.OPENSSHPRIVATEKEY,
-  logs.DataIdentifier.IPADDRESS,
-]
-
-/**
- * The subset masked on write: each has a structure a matcher can verify, so a hit is a hit.
+ * So the list is the identifiers with a structure a matcher can verify — an email, a card, an SSN, a
+ * CPF, a key. A hit on one of these is a hit.
  *
- * `NAME`, `ADDRESS`, `PHONENUMBER_US` and `IPADDRESS` are deliberately absent — audited, not masked.
- * They are the four that matched prose and a bind address above.
+ * **Why not audit widely and mask narrowly**, which was the first attempt at this. The service
+ * refuses: the `Deidentify` array *must exactly match* the `Audit` array, and a deploy that tries
+ * otherwise fails with "Audit Statement and Deidentify Statement must have the same Data
+ * Identifiers". Detection and masking are one decision, not two.
+ *
+ * **What that leaves uncovered, deliberately.** Personal names, postal addresses, phone numbers and
+ * IP addresses appearing in conversation are neither masked nor detected here. What still covers
+ * them: the Bedrock guardrail on the model path, and `span-redaction.ts` for tool arguments and
+ * results — which is where `get_signed_in_user` returns the caller's identity. A fork whose traffic
+ * carries names in the prompt itself should weigh adding `NAME` back, knowing it will also mask
+ * prose, or write a custom data identifier scoped to its own format. The findings destination below
+ * is what makes that judgement evidence-based rather than a guess.
  */
 const MASKED_IDENTIFIERS = [
   logs.DataIdentifier.EMAILADDRESS,
@@ -683,32 +671,32 @@ const MASKED_IDENTIFIERS = [
 /**
  * The masking policy, as the document both log groups take.
  *
- * Written out rather than built with the L2 `DataProtectionPolicy`, which renders one identifier
- * list into both the audit and the deidentify statement and so cannot express the split above. Both
- * log groups take this same string — the telemetry group through an escape hatch, the runtime's own
- * group through `PutDataProtectionPolicy` — because a reader must not find in one group what was
- * masked in the other.
+ * Written out rather than built with the L2 `DataProtectionPolicy` so the runtime's own log group —
+ * which AgentCore creates, not this stack — can receive the identical string through
+ * `PutDataProtectionPolicy`. A reader must not find in one group what was masked in the other.
  */
 function maskingPolicyDocument(projectName: string, findingsLogGroup: string): string {
-  const arns = (identifiers: logs.DataIdentifier[]) =>
-    identifiers.map((identifier) => `arn:aws:dataprotection::aws:data-identifier/${identifier.name}`)
+  const identifiers = MASKED_IDENTIFIERS.map(
+    (identifier) => `arn:aws:dataprotection::aws:data-identifier/${identifier.name}`,
+  )
 
   return JSON.stringify({
     Name: `${projectName}-agent-masking`,
-    Description: 'Audits personal data and masks the identifiers precise enough to mask.',
+    Description: 'Masks the personal and credential data precise enough to match reliably.',
     Version: '2021-06-01',
     Statement: [
       {
         Sid: 'audit',
-        DataIdentifier: arns(AUDITED_IDENTIFIERS),
-        // A destination is what makes the audit statement worth having. Without it the findings are
-        // computed and dropped, so nobody can see what the masked list is missing — which is exactly
-        // the evidence a fork needs to widen it.
+        DataIdentifier: identifiers,
+        // The destination is what makes the audit half worth having. It was an empty object, so
+        // findings were computed and dropped — which is why the false positive above could not be
+        // attributed to an identifier even once it was noticed.
         Operation: { Audit: { FindingsDestination: { CloudWatchLogs: { LogGroup: findingsLogGroup } } } },
       },
       {
         Sid: 'redact',
-        DataIdentifier: arns(MASKED_IDENTIFIERS),
+        // Identical by requirement, not by coincidence: the service rejects any other arrangement.
+        DataIdentifier: identifiers,
         Operation: { Deidentify: { MaskConfig: {} } },
       },
     ],
