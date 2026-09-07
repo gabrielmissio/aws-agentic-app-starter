@@ -23,6 +23,11 @@ Listens on `http://localhost:8080` with `GET /ping` and `POST /invocations`.
 `.env.example` documents every variable; the ones that matter are `AWS_REGION`, `BEDROCK_MODEL_ID`,
 and `AGENT_RUNTIME_ARN` for `invoke:bedrock`.
 
+> Behind a TLS-inspecting corporate proxy, local calls fail on certificate verification and
+> `NODE_TLS_REJECT_UNAUTHORIZED=0` is the usual workaround. Export it for the one command that needs
+> it — never put it in `.env`. It disables verification for the *whole process*, the calls to Bedrock
+> included, and a value in `.env` outlives the afternoon you needed it.
+
 ## Conversation memory
 
 History lives in AgentCore Memory ([`src/memory.ts`](src/memory.ts)), not in the container. Each turn

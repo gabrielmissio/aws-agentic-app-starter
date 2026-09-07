@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { parseBaggage, startTelemetry, telemetryResource } from '../telemetry'
+import { countGuardedTurn, parseBaggage, startTelemetry, telemetryResource } from '../telemetry'
 import { parseOtlpHeaders } from '../otlp-sigv4'
 
 /**
@@ -41,6 +41,29 @@ describe('startTelemetry', () => {
 
     expect(telemetry.enabled).toBe(true)
     await expect(telemetry.flush()).resolves.toBeUndefined()
+  })
+})
+
+/**
+ * The counter runs on the request path, inside the loop that reads each stream event. If it could
+ * throw, a guardrail intervention — the moment the deployment most needs to keep working — would
+ * become a failed turn instead of a recorded one.
+ *
+ * With telemetry off, `metrics.getMeter` hands back the API's no-op meter, so this is a real
+ * assertion about the local and demo paths rather than a formality: nothing here has credentials, a
+ * region, or a log group to write to.
+ */
+describe('countGuardedTurn', () => {
+  it('is safe to call before any provider is registered', () => {
+    expect(() => countGuardedTurn()).not.toThrow()
+  })
+
+  /** Twice, because the instrument is memoized on first use and the second call takes a new path. */
+  it('is safe to call repeatedly', () => {
+    expect(() => {
+      countGuardedTurn()
+      countGuardedTurn()
+    }).not.toThrow()
   })
 })
 

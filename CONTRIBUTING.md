@@ -19,6 +19,20 @@ npm run bootstrap
 runs `npm ci` in the root and in all four subpackages, and why `.github/dependabot.yml` names five
 directories. Running `npm ci` in the root alone leaves the subpackages empty.
 
+**Every install passes `--ignore-scripts`.** A dependency's lifecycle script is arbitrary code running
+with your shell's privileges, and the same `bootstrap` runs in CI — where the workflow goes to some
+trouble to keep the `GITHUB_TOKEN` out of reach of exactly that (`persist-credentials: false`). It was
+once set on the root install only, which is the one place it mattered least. Nothing here needs a
+postinstall: the only package that has one is `esbuild`, whose platform binary arrives through
+`optionalDependencies`. If you add a dependency that genuinely does, say so in the pull request rather
+than dropping the flag — that is a supply-chain decision every fork inherits.
+
+**The root pins an older TypeScript than the packages, on purpose.** The root exists to run
+`eslint .` across everything, and `typescript-eslint` declares `typescript: >=4.8.4 <6.1.0` — true of
+the current release as well as the pinned one — so the root cannot go past 6.x without breaking the
+lint. The four packages typecheck with 7.x. Raise the root pin only once `typescript-eslint` widens
+that range.
+
 ## The gate
 
 ```bash
@@ -26,9 +40,26 @@ npm run verify   # lint, typecheck, test — across every package
 npm run audit    # npm audit --audit-level=high, every package
 ```
 
-Both must pass before you open a pull request. CI runs exactly these two
-(`.github/workflows/ci.yml`), so a green local run is a green CI run — neither needs AWS credentials,
+Both must pass before you open a pull request. CI's `verify` job runs exactly these two
+(`.github/workflows/ci.yml`), so a green local run is a green CI job — neither needs AWS credentials,
 Docker or a browser.
+
+CI runs three more jobs — `synth` (`npm run synth`, which you can also run), plus `secrets`
+(TruffleHog) and `sast` (Semgrep CE), which need Docker rather than credentials. All can fail a pull
+request. If `secrets` or `sast` flags something that is not a real problem, suppress it at the line with
+the evidence beside it — `// nosemgrep: <full-rule-id>` — rather than widening an exclude or deleting
+the job. There are two such suppressions today, in `agent/src/caller.ts` and
+`chatbot-frontend/src/__tests__/qrcode.test.ts`. Both are listed in the `sast` summary on the run page:
+a suppression whose justification has stopped holding should be visible, not silent.
+
+`synth` also runs `npm run nag`, an `AwsSolutionsChecks` report over the synthesized stacks. It is
+**report-only and cannot fail your pull request** — see `infra/src/nag.ts` for why gating on it would
+be the wrong trade for a template. What it is for is the count: if your change moves it, the summary
+says which rule and which resource, and that is worth a sentence in the pull request either way.
+
+The whole gate is deliberately free of external configuration: no AWS credentials, no repository
+secrets, no GitHub Code Security. If a change to CI would introduce one, say so in the pull request —
+it is a cost every fork inherits.
 
 ## Tests
 
@@ -39,8 +70,10 @@ knowing before you add one:
 * **`infra/` asserts security properties against the synthesized template** via
   `aws-cdk-lib/assertions`. A change to an IAM grant, the profile gate or an encryption setting
   belongs there, as an assertion — not only in a README line.
-* **`AgentStack` is never synthesized**, because constructing it builds a real Docker image. Its
-  invariants are asserted by reading the source instead. Add to that suite the same way.
+* **`AgentStack` is synthesized like the other three.** It was once excluded on the belief that its
+  `DockerImageAsset` builds the image at synth time; CDK stages the build context at synth and builds
+  at publish time, so the suite needs no Docker. Assert against the synthesized resource, not the
+  source text — a source grep passes on a stack that assigns the property through a variable.
 
 A change to the deployment-profile gate (`infra/src/config.ts`) needs a test for both directions: the
 value the gate accepts, and the value it refuses.

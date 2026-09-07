@@ -33,7 +33,7 @@ import {
   resolveWafEnabled,
 } from './config.js'
 
-const app = new cdk.App()
+export const app = new cdk.App()
 
 const projectName =
   app.node.tryGetContext('projectName') ?? process.env.PROJECT_NAME ?? DEFAULT_PROJECT_NAME

@@ -17,6 +17,13 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    # Wait a week before proposing a newly published version. The npm supply-chain attacks of recent
+    # years all shared a shape: a compromised maintainer account publishes a malicious patch release,
+    # and it is yanked within days. A bot that upgrades on publication day is the fastest possible path
+    # from that compromise into this repository. Security updates are exempt — those are the ones worth
+    # taking immediately.
+    cooldown:
+      default-days: 7
     groups:
       # Patch and minor bumps arrive as one reviewable pull request per package rather than a queue
       # of near-identical ones. Majors stay separate: those are the ones worth reading.
@@ -31,3 +38,5 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7

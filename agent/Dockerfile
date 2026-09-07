@@ -33,8 +33,8 @@ RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=build /app/dist ./dist
 
 # Drop root before running the app. node:22-slim already ships a non-root `node` user (uid 1000);
-# a deployed runtime writes its session snapshots to S3, not to disk, so read access to the
-# root-owned files above is enough.
+# nothing here writes to disk — conversations go to AgentCore Memory and telemetry to CloudWatch — so
+# read access to the root-owned files above is enough.
 USER node
 
 EXPOSE 8080

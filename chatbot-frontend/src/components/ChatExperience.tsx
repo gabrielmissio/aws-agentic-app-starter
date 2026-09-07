@@ -7,7 +7,7 @@ import { ThinkingBubble } from './ThinkingBubble.tsx'
 import { LanguageSwitcher } from './LanguageSwitcher.tsx'
 import { Alert, AppHeader, BrandAvatar, Button, CARD_CLASS } from './ui/index.ts'
 import { sendMessageBff } from '@/lib/api.ts'
-import { EmptyReplyError } from '@/lib/stream-parser.ts'
+import { EmptyReplyError, TurnLimitError } from '@/lib/stream-parser.ts'
 import {
   deleteConversation,
   listConversations,
@@ -234,13 +234,16 @@ export function ChatExperience({ userEmail, isAdmin, onSignOut, onOpenAdmin }: C
       onComplete: () =>
         patch((msg) => ({ ...msg, isStreaming: false, activeTool: undefined, status: undefined })),
       onError: (error: Error) => {
-        // An empty reply carries no server message to show, so the UI supplies its own wording;
-        // anything else is quoted, because the sentence the model layer produced is the one that
-        // names the actual problem — a denied model, a throttle, a blocked completion.
+        // Neither of the two silent-failure shapes carries a server message to show, so the UI
+        // supplies its own wording; anything else is quoted, because the sentence the model layer
+        // produced is the one that names the actual problem — a denied model, a throttle, a blocked
+        // completion.
         const notice =
           error instanceof EmptyReplyError
             ? t('chat.errorEmptyReply')
-            : t('chat.errorWithMessage', { message: error.message })
+            : error instanceof TurnLimitError
+              ? t('chat.errorTurnLimited')
+              : t('chat.errorWithMessage', { message: error.message })
 
         patch((msg) => ({
           ...msg,

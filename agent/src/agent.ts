@@ -1,4 +1,6 @@
 import * as strands from '@strands-agents/sdk'
+import { createHash } from 'node:crypto'
+import { MAX_AGENT_OUTPUT_TOKENS } from './limits'
 import { createTools } from './tools'
 
 /**
@@ -45,11 +47,35 @@ const guardrailConfig = resolveGuardrail()
 const bedrockModel = new strands.BedrockModel({
   region: process.env.AWS_REGION || 'us-east-1',
   modelId: process.env.BEDROCK_MODEL_ID || 'us.anthropic.claude-sonnet-5',
+  // The hard ceiling on one response. `agentLimits` bounds the loop and is checked at turn
+  // boundaries, so it can be overshot by a single oversized reply; this is the cap that cannot be.
+  maxTokens: MAX_AGENT_OUTPUT_TOKENS,
   ...(guardrailConfig ? { guardrailConfig } : {}),
 })
 
 /** Whether model input and output pass through a Bedrock guardrail. Reported once at boot. */
 export const isGuarded = Boolean(guardrailConfig)
+
+/**
+ * The stop reasons that mean a content control ended the turn rather than the model finishing it.
+ *
+ * Both return 200 with an ordinary-looking answer, which is why they need recording: the guardrail
+ * is the only layer in this stack that reads what is *said*, and until `index.ts` logged and counted
+ * these, nothing anywhere recorded that it had ever acted. A deployment could not answer "how often
+ * did the guardrail fire this week", and a redacted reply was indistinguishable from a short one.
+ *
+ * `guardrailIntervened` is the guardrail configured above. `contentFiltered` is the model's own
+ * filter, which acts whether or not a guardrail is attached — so this set is meaningful even in a
+ * demo that never set `GUARDRAIL_ENABLED`. Both spellings are the SDK's normalized form of the
+ * Bedrock wire values (`guardrail_intervened`, `content_filtered`).
+ *
+ * Written down here rather than inline in `index.ts` because nothing can type-check it: the SDK's
+ * `StopReason` union ends in `(string & {})`, so every string satisfies it and a rename upstream
+ * would compile cleanly and silently stop the counter. One named set with a test over it is the
+ * strongest guarantee available — it does not catch the rename, but it makes the thing to re-check
+ * on an SDK upgrade a single exported constant instead of two string literals in a loop body.
+ */
+export const GUARDED_STOP_REASONS = new Set(['guardrailIntervened', 'contentFiltered'])
 
 /** Resolved once at module load: the toolset is a function of the deployment, not of the request. */
 const tools = createTools()
@@ -90,6 +116,24 @@ claim about who someone is from the conversation.
 `.trim()
 
 /**
+ * A short digest of the prompt above, stamped on every span the agent raises.
+ *
+ * The prompt is the largest un-versioned input to a turn. The guardrail beside it is pinned to an
+ * immutable numbered version precisely so an edit cannot change what is enforced without a
+ * deployment and a record — the same argument applies here, and until now nothing carried it: a
+ * trace could not answer "which prompt produced this answer", so a regression reported from a pilot
+ * could not be tied to a revision.
+ *
+ * A content hash rather than a hand-maintained number, because a version someone has to remember to
+ * bump is a version that silently stops matching the prompt. Eight hex characters is enough to tell
+ * two revisions apart in a trace filter; it is an identity, not a checksum anyone verifies.
+ */
+export const systemPromptVersion = createHash('sha256')
+  .update(systemPrompt)
+  .digest('hex')
+  .slice(0, 8)
+
+/**
  * A fresh agent per request — never a shared one. A Strands `Agent` keeps its own `messages` array,
  * so one reused across requests on a warm container accumulates state *across callers*: one user's
  * conversation leaks into the next, and concurrent invocations interleave their appends.
@@ -106,9 +150,27 @@ export function createAgent(
     model: bedrockModel,
     tools: [...tools],
     ...(messages ? { messages } : {}),
+    // Off, and this is not a style preference. The SDK defaults it *on* (`printer ?? true`), and its
+    // printer writes every text delta and every reasoning block to `process.stdout` — which under
+    // AgentCore is the runtime's log group. The deployed template was therefore filing each answer,
+    // verbatim and line by line, into CloudWatch Logs: 800KB of it inside a week.
+    //
+    // That contradicts the rule the rest of this template holds to. `correlation.ts` states it for
+    // the BFF — conversation content has a storage location with a declared retention, and a log
+    // group is not it — and `span-redaction.ts` goes to real trouble to keep tool output off the
+    // spans. A default nobody chose was undoing both, one console write at a time, and reasoning
+    // content in particular is text the user never sees and never agreed to have kept.
+    //
+    // Nothing reads that stream: the HTTP response above is written from the same events.
+    printer: false,
     // Stamped on every span this agent raises. `session.id` is the attribute CloudWatch's GenAI
     // Observability page groups a conversation by, so without it a trace is one turn floating free
-    // rather than a step in a session someone can replay.
-    ...(traceAttributes ? { traceAttributes } : {}),
+    // rather than a step in a session someone can replay. The prompt version rides along
+    // unconditionally — it is a property of the build, not of the request, so there is no turn it
+    // should be missing from.
+    traceAttributes: {
+      'gen_ai.system_instructions.version': systemPromptVersion,
+      ...traceAttributes,
+    },
   })
 }

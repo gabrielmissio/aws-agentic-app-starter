@@ -3,8 +3,8 @@
  *
  * **Why not OTLP, when the spans go out over OTLP.** CloudWatch does have a metrics OTLP endpoint,
  * but what it ingests lands in the PromQL-queryable store rather than as a classic
- * namespace/dimension metric. A CloudWatch alarm and a dashboard widget — the two things the
- * assessment asks for and the reason these numbers are wanted at all — are built on the classic
+ * namespace/dimension metric. A CloudWatch alarm and a dashboard widget — the two things these
+ * numbers are wanted for, and the reason they are collected at all — are built on the classic
  * kind. EMF produces exactly that: CloudWatch Logs extracts a metric from any log event carrying an
  * `_aws.CloudWatchMetrics` block, so the namespace, the dimensions and the units are ours to name,
  * and the only permission involved is writing to a log group this stack already owns.
@@ -12,7 +12,7 @@
  * What this makes available, from instruments Strands already emits and nothing here has to invent:
  * `gen_ai.agent.tokens.input`/`.output`, `gen_ai.agent.tool.call.count`, `.tool.error.count`,
  * `gen_ai.agent.tool.duration`, `gen_ai.agent.model.latency` and `gen_ai.server.time_to_first_token`.
- * The assessment lists these as absent business metrics; they were never absent, only unexported.
+ * None of them had to be invented — they were emitted all along and simply never exported.
  */
 import { context } from '@opentelemetry/api'
 import { randomUUID } from 'node:crypto'

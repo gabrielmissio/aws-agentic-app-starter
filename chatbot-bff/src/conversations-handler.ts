@@ -10,8 +10,8 @@
  * untrusted model output must not hold that. `stacks.test.ts` asserts the chat role's action set
  * exhaustively, so the separation is enforced rather than remembered.
  *
- * Every route is scoped to the caller by `belongsToCaller`: a session id names an S3 prefix, so an
- * id that is not the caller's is a path to someone else's transcript.
+ * Every route is scoped to the caller by `belongsToCaller`: a session id names one conversation in
+ * AgentCore Memory, so an id that is not the caller's is a path to someone else's transcript.
  */
 import {
   BedrockAgentCoreClient,

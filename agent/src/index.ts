@@ -3,11 +3,11 @@
 // runs — so an import here would register after the SDK clients below are already resolved, and
 // produce no spans at all. It is preloaded instead, via `node --import` in the `start` script.
 import express, { type NextFunction, type Request, type Response } from 'express'
-import { createAgent, isGuarded } from './agent'
-import { MAX_BODY_BYTES, MAX_BODY_LENGTH } from './limits'
+import { createAgent, GUARDED_STOP_REASONS, isGuarded, systemPromptVersion } from './agent'
+import { agentLimits, LIMIT_STOP_REASONS, MAX_BODY_BYTES, MAX_BODY_LENGTH } from './limits'
 import { parsePrompt, withCaller } from './caller'
 import { isDurable, loadHistory, recordTurn } from './memory'
-import { parseBaggage, startTelemetry, withRemoteContext } from './telemetry'
+import { countGuardedTurn, parseBaggage, startTelemetry, withRemoteContext } from './telemetry'
 
 // Before anything else: the Agent's spans and metrics are emitted unconditionally but reach a no-op
 // provider until this registers a real one, so a late call silently loses the first requests.
@@ -89,7 +89,26 @@ app.post(
             ...(sessionId ? { 'session.id': sessionId } : {}),
             ...(correlationId ? { 'correlation.id': correlationId } : {}),
           })
-          for await (const event of agent.stream(prompt)) {
+
+          /**
+           * Cancels the loop when the caller goes away.
+           *
+           * Without this the container keeps calling Bedrock for a turn nobody is reading: the BFF's
+           * 60s timeout ends the relay, the browser is gone, and the loop runs on being billed. The
+           * `close` event fires on a normal end too, hence the `writableEnded` guard — aborting there
+           * would cancel a turn that had already finished.
+           */
+          const cancellation = new AbortController()
+          res.on('close', () => {
+            if (!res.writableEnded) cancellation.abort()
+          })
+
+          for await (const event of agent.stream(prompt, {
+            // Omitted, Strands treats every dimension as unlimited — see `limits.ts` for why that is
+            // the one axis nothing else in this template bounds.
+            limits: agentLimits,
+            cancelSignal: cancellation.signal,
+          })) {
             // A failed model or tool call arrives as an ordinary lifecycle event carrying an `error`
             // and does not throw: the stream finishes, this handler answers 200, and the BFF relays a
             // `done` that says ok. Without this line the log group shows a turn that looks entirely
@@ -103,6 +122,46 @@ app.post(
                   correlationId,
                   sessionId,
                   reason: String(failure.message),
+                }),
+              )
+            }
+
+            // A cap firing is not an error and does not throw: the loop stops, the stream ends, and
+            // the answer simply arrives shorter than it should have. Logged for exactly that reason —
+            // an unexplained truncation is indistinguishable from a model that had nothing more to
+            // say, and this is the only record that tells the two apart.
+            const stopReason = (event as { result?: { stopReason?: unknown } }).result?.stopReason
+            if (typeof stopReason === 'string' && LIMIT_STOP_REASONS.has(stopReason)) {
+              console.error(
+                JSON.stringify({
+                  level: 'error',
+                  event: 'turn.limited',
+                  correlationId,
+                  sessionId,
+                  reason: stopReason,
+                  limits: agentLimits,
+                }),
+              )
+            }
+
+            // A content control ending the turn is the third way a turn goes wrong while answering
+            // 200, and it was the one nothing recorded. The guardrail is the only layer here that
+            // reads what is said; when it intervenes, the reply the user gets is not the one the
+            // model wrote, and without this line the sole evidence of that is the answer itself.
+            //
+            // Logged at the same level as the two above, on purpose: `turn.failed`, `turn.limited`
+            // and `turn.guarded` are one class — the turn did not end the way the model intended —
+            // and one query on `level` should find all three. The counter beside it is what makes
+            // "how often did the guardrail fire this week" answerable without reading any of them.
+            if (typeof stopReason === 'string' && GUARDED_STOP_REASONS.has(stopReason)) {
+              countGuardedTurn()
+              console.error(
+                JSON.stringify({
+                  level: 'error',
+                  event: 'turn.guarded',
+                  correlationId,
+                  sessionId,
+                  reason: stopReason,
                 }),
               )
             }
@@ -175,8 +234,12 @@ const server = app.listen(PORT, () => {
   console.log(`   POST http://0.0.0.0:${PORT}/invocations`)
   console.log(`   GET  http://0.0.0.0:${PORT}/ping`)
   // Each of these is a posture the deployment either has or does not. Printed once, at boot, so an
-  // operator reads them from the log group instead of inferring them from behaviour.
+  // operator reads them from the log group instead of inferring them from behaviour. `prompt` is the
+  // digest stamped on every span, so a trace can be tied back to the prompt that produced it.
   console.log(`   guardrail=${isGuarded} durableSessions=${isDurable} telemetry=${telemetry.enabled}`)
+  console.log(
+    `   prompt=${systemPromptVersion} maxTurns=${agentLimits.turns} maxTotalTokens=${agentLimits.totalTokens}`,
+  )
 })
 
 /**

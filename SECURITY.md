@@ -49,7 +49,9 @@ The template's own code and configuration:
 
 ## Supported versions
 
-There are no releases yet. `main` is the only supported line, and fixes land there.
+Fixes land on `main`, and that is the only line that gets them. A tagged release is a snapshot of
+`main` at a point in time, not a branch that receives backports — if you are on an older tag, upgrade
+rather than waiting for a patch release.
 
 This software is provided under the [MIT License](LICENSE), without warranty of any kind. A security
 policy is a commitment to handle reports responsibly; it is not a warranty that the template is

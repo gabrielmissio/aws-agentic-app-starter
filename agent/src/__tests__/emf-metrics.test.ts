@@ -34,7 +34,24 @@ describe('metricName', () => {
   /** CloudWatch rejects a dot in a metric name, and every Strands instrument has three. */
   it('turns a dotted instrument name into a CloudWatch-legal one', () => {
     expect(metricName('gen_ai.agent.tokens.input')).toBe('GenAiAgentTokensInput')
-    expect(metricName('gen_ai.server.time_to_first_token')).toBe('GenAiServerTimeToFirstToken')
+    expect(metricName('gen_ai.agent.tool.call.count')).toBe('GenAiAgentToolCallCount')
+  })
+
+  /**
+   * The other half of a contract this package cannot type-check. `infra/src/stacks/bff-stack.ts`
+   * charts these names as string literals — the two packages do not import each other — so what
+   * keeps a widget pointed at a real metric is that both sides spell the same thing, and this is the
+   * side that can prove what the exporter produces.
+   *
+   * `gen_ai.server.time_to_first_token` used to be the second example here, which made the mapping
+   * look verified when the instrument behind it does not exist: Strands emits no such measurement,
+   * and the dashboard charted its PascalCase name against nothing for as long as this test implied
+   * otherwise. A name mapping correctly is not evidence that anything writes it.
+   */
+  it('produces the names the dashboard charts', () => {
+    expect(metricName('gen_ai.agent.guarded.count')).toBe('GenAiAgentGuardedCount')
+    expect(metricName('gen_ai.agent.cycle.duration')).toBe('GenAiAgentCycleDuration')
+    expect(metricName('gen_ai.agent.model.latency')).toBe('GenAiAgentModelLatency')
   })
 })
 

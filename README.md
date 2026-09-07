@@ -128,18 +128,18 @@ that fails at this job: whoever copies this repo to run a pilot is not whoever r
 `cdk synth` fails before a resource is described, naming every violation at once:
 
 ```text
-DEPLOY_PROFILE=pilot refuses 9 sandbox defaults:
+DEPLOY_PROFILE=pilot refuses 10 sandbox defaults:
   - PUBLIC_SIGNUP_ENABLED must be false. Open sign-up lets anyone mint accounts, …
   - COGNITO_MFA must be "required". A password alone is one leaked credential away …
   - GUARDRAIL_ENABLED must be true. Nothing else in this stack inspects what the model …
-  … and six more, each naming its variable and the reason it is refused
+  … and seven more, each naming its variable and the reason it is refused
 ```
 
-Five of the nine are **access posture** — sign-up, CORS origin, alarm subscriber, second factor,
-threat protection. One is **durability**: `RETAIN_DATA`. The last three are **evidence posture** —
-whether a deployment can say what the agent replied, how long it is kept, and which turn a user is
-complaining about. A deployment can satisfy every access rule and still answer none of those three,
-which is why they are gated rather than documented.
+Five of the ten are **access posture** — sign-up, CORS origin, alarm subscriber, second factor,
+threat protection. One is **durability**: `RETAIN_DATA`. The last four are **evidence posture** —
+whether a deployment traces a turn at all, whether the agent's own decisions are recorded, whether
+the spans survive being accepted, and how long any of it is kept. A deployment can satisfy every
+access rule and still answer none of those four, which is why they are gated rather than documented.
 
 ## Local development
 
@@ -157,16 +157,56 @@ validation and a fixed caller id: it exercises the streaming path, not the autho
 | `npm run lint` / `typecheck` / `test` | ESLint · `tsc --noEmit` · vitest, across every package |
 | `npm run verify` | All three — what to run before opening a PR |
 | `npm run audit` | `npm audit --audit-level=high` in every package |
+| `npm run build` | Build every deployable artifact — agent bundle, BFF bundles, frontend `dist` |
 | `npm run synth` | Build artifacts and synthesize the CDK app |
 | `npm run deploy` | Deploy all infrastructure |
 | `npm run deploy:no-approval` | The same with no confirmation prompt — sandbox or pipeline only |
 | `npm run destroy` | Destroy all stacks |
 | `npm run docker:setup-arm64` | Enable local ARM64 emulation for the agent image build |
 
-`verify` and `audit` are also what CI runs on every push and pull request
-(`.github/workflows/ci.yml`), so the two agree by construction. Nothing there needs AWS credentials.
-Dependency updates arrive as pull requests from Dependabot (`.github/dependabot.yml`) — the audit
-gate reports what is already vulnerable, and something has to move the versions forward.
+### The CI gate
+
+`.github/workflows/ci.yml` runs five jobs, named so a red check says which concern broke. **It needs no
+AWS credentials, no repository secrets and no paid GitHub feature** — clone the template, open a pull
+request, and the gate works.
+
+| Job | Runs | Also runnable locally |
+|---|---|---|
+| `verify` | `npm run verify` then `npm run build` | Yes — identical |
+| `audit` | `npm run audit` | Yes — identical. Needs no `node_modules` |
+| `synth` | `npm run synth` — the only check that executes the real `app.ts` — then `npm run nag`, an IaC policy report | Yes — identical |
+| `secrets` | TruffleHog, pinned by action SHA *and* scanner version | Yes, with Docker |
+| `sast` | Semgrep CE, `p/default`, pinned by image digest | Yes, with Docker |
+
+Two details worth knowing. **Gating and reporting are separate concerns here.** Every job gates
+through its own exit code, so a fork on any plan gets the same red or green; reporting is layered on
+top and degrades instead of failing. `sast` and `synth` both render a table to the run's summary page
+and attach their raw report as an artifact — free everywhere — and `sast` additionally uploads to code
+scanning when the repository is public, where that is free. Only the upload can be unavailable, and
+losing it costs a nicer view of a result already reported twice.
+And **`secrets` scans a pull request's diff, not its whole history**: the full-history pass runs on the
+weekly schedule, where it is worth the time. That schedule is also what re-runs `audit` against
+advisories published since the last commit.
+
+Dependency updates arrive as pull requests from Dependabot (`.github/dependabot.yml`), which waits
+seven days before proposing a new version — long enough that a compromised publish is usually yanked
+first. The audit gate reports what is already vulnerable; something has to move the versions forward.
+
+The IaC policy scan runs **report-only**, and that is a deliberate stopping point rather than a job
+half-wired. `cdk-nag`'s `AwsSolutionsChecks` reports **44 findings in CI** — and 53 against a `.env`
+with WAF, the guardrail and observability switched on, which is why the summary states the posture it
+scanned before it states the count. Roughly a third of either number is on constructs CDK generates for
+itself — the bucket deployment behind
+`s3-deployment`, the custom-resource Lambdas behind log-group governance. Gating means writing a
+suppression for every one of them first, and a template whose forks inherit fifty pre-accepted
+exceptions has made its suppression list worthless: it stops reading as *decisions we took* and starts
+reading as *noise that came with the template*.
+
+What the report is worth with no suppression written is the delta. A pull request that takes 53 to 55
+has added two, and the summary names the rule and the resource. Some of the 53 are real and already
+tracked under *What this template leaves open* — the CloudFront hardening, S3 access logs, API request
+validation. Run it yourself with `npm run nag`; note that it reads your `.env`, so your number
+describes your posture and only the CI number is comparable across runs.
 
 There is no deploy pipeline: `deploy` runs from your machine against whatever credentials are in the
 shell. Adding one is the first thing a shared environment needs.
@@ -194,9 +234,12 @@ calling those rules and reaching no store when they say no, because a rule that 
 and is never consulted protects nothing. `infra/src/__tests__/app.test.ts` does the same for the
 profile gate: `config.test.ts` covers the rules, that file covers `app.ts` actually calling them.
 
-`AgentStack` is never synthesized in `infra/`'s suite — constructing it builds a real Docker image.
-Its invariants are asserted by reading the source instead, which is how the runtime's absent
-authorizer configuration and its narrow ECR grant stay covered; add to that suite the same way.
+`AgentStack` is synthesized in `infra/`'s suite like the other three. It used to be excluded on the
+belief that its `DockerImageAsset` builds the agent image at synth time — it does not: CDK stages the
+build context at synth and builds at *publish* time, so the suite needs no Docker. Its invariants —
+the runtime's absent authorizer configuration, the narrow ECR grant, the single-model Bedrock scope —
+are therefore asserted against the synthesized resource rather than by reading the source, which is
+stronger: a source grep passes on a stack that assigns the property through a variable.
 Rendered React components are not covered, which would need `@testing-library/react` + `jsdom`.
 
 ## Conversations
@@ -265,10 +308,12 @@ It is scaffolding, not a finished product. What is deliberately yours:
   `ACTIVE`. If the deploy fails on a delivery destination, see
   [infra/README.md](infra/README.md#troubleshooting).
 * **There is no CD pipeline.** Deploys run from a developer's machine with ambient credentials, and
-  CI never runs `cdk synth` — constructing `AgentStack` builds the agent image, so a synth in CI
-  would need Docker. The gate itself is covered without one: `infra/src/__tests__/app.test.ts`
-  executes `app.ts` under `pilot` and asserts it refuses, which throws before the first construct.
-  What CI still cannot catch is a template that synthesizes but describes the wrong resource.
+  CI never runs `cdk synth`. That is now a gap rather than a constraint: synth needs no Docker and no
+  credentials — the suite already synthesizes all four stacks — so the missing piece is a job that
+  runs it and compares the result. The gate itself is covered without one:
+  `infra/src/__tests__/app.test.ts` executes `app.ts` under `pilot` and asserts it refuses, which
+  throws before the first construct. What nothing yet catches is a template that synthesizes but
+  describes the wrong resource in a way no assertion names.
 
 Before a pilot with real users: set `DEPLOY_PROFILE=pilot` and fix what it refuses, pin
 `DEPLOY_ACCOUNT`/`DEPLOY_REGION`, turn on `WAF_ENABLED`, and decide what your tools may reach.

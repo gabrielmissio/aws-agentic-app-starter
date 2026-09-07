@@ -3,8 +3,8 @@
  *
  * The Strands `Agent` already emits spans and metrics — token counts per cycle, per-tool call counts
  * and durations, time to first token — but only once a provider is registered globally. Without this
- * module those instruments exist and write to a no-op provider, which is the state the assessment
- * found: the runtime role holds X-Ray and `PutMetricData` permissions that nothing uses.
+ * module those instruments exist and write to a no-op provider: the runtime role holds X-Ray and
+ * `PutMetricData` permissions that nothing ever uses, and no telemetry leaves the container.
  *
  * **Enabled by `AGENT_OBSERVABILITY_ENABLED`**, the variable AgentCore itself defines for this, and
  * not by `OTEL_EXPORTER_OTLP_ENDPOINT` as it once was. That earlier gate encoded a model AWS has
@@ -24,7 +24,7 @@
  * rather than the namespace/dimension metrics a dashboard widget and an alarm are built on — see
  * `emf-metrics.ts`.
  */
-import { context, propagation, type Context } from '@opentelemetry/api'
+import { context, metrics, propagation, type Context, type Counter } from '@opentelemetry/api'
 import { W3CBaggagePropagator, W3CTraceContextPropagator, CompositePropagator } from '@opentelemetry/core'
 import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks'
 import { detectResources, envDetector, resourceFromAttributes } from '@opentelemetry/resources'
@@ -115,6 +115,33 @@ export function startTelemetry(env: NodeJS.ProcessEnv = process.env): Telemetry 
       await Promise.allSettled([tracerProvider.forceFlush(), meterProvider.forceFlush()])
     },
   }
+}
+
+/**
+ * Counts a turn a content control ended, as one more instrument in the agent's own namespace.
+ *
+ * Everything else in that namespace is something Strands emits and `emf-metrics.ts` merely exports.
+ * This one is ours, because the event has no instrument upstream: a guardrail intervention arrives
+ * as an ordinary stop reason on a successful turn (`GUARDED_STOP_REASONS` in `agent.ts`), so the
+ * only record it left was the answer being quietly different from the one the model wrote.
+ *
+ * Deliberately carries no attributes. `emf-metrics.ts` turns every attribute into a CloudWatch
+ * dimension, so a `reason` here would mean the metric only existed under `(ServiceName, Reason)` and
+ * an alarm on "any intervention" would have to enumerate the reasons. The reason goes on the log
+ * line instead, which is where you look once the count tells you to look at all.
+ *
+ * The meter is resolved on first use rather than at module load: `startTelemetry` is what registers
+ * the global provider, and an instrument created before it would be bound to the no-op one. When
+ * telemetry is off it stays no-op, which is the correct behaviour and not an error.
+ */
+let guardedTurns: Counter | undefined
+
+export function countGuardedTurn(): void {
+  guardedTurns ??= metrics.getMeter('agent').createCounter('gen_ai.agent.guarded.count', {
+    description: 'Turns ended by a guardrail intervention or the model content filter',
+  })
+
+  guardedTurns.add(1)
 }
 
 /**

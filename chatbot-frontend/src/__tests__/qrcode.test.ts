@@ -11,7 +11,10 @@ import qrcode from 'qrcode-generator'
  * which no type check catches.
  */
 
+// The RFC 6238 example base32 secret, published in the spec itself. It authenticates nothing; a real
+// one would not be in a repository.
 const OTPAUTH_URI =
+  // nosemgrep: generic.secrets.security.detected-generic-secret.detected-generic-secret
   'otpauth://totp/Aria:user@example.com?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP&issuer=Aria&algorithm=SHA1&digits=6&period=30'
 
 describe('encoding an enrollment URI', () => {

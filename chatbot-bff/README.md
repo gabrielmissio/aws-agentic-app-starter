@@ -26,6 +26,10 @@ path, not the authorization one.
 deployed Lambdas by `infra/src/stacks/bff-stack.ts` and are absent from it on purpose: `local.ts` has
 no admin routes to exercise and no DynamoDB table to point at.
 
+> Behind a TLS-inspecting corporate proxy, `NODE_TLS_REJECT_UNAUTHORIZED=0` is the usual workaround for
+> local calls. Export it for the one command that needs it rather than putting it in `.env`: it disables
+> verification for the whole process, and a value in `.env` outlives the reason for it.
+
 ## Why the BFF is the only transport
 
 No tool takes a user id — an identity a model can pass is one a prompt can talk it into changing.

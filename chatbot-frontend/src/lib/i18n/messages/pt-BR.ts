@@ -89,6 +89,8 @@ export const ptBR = {
   'chat.errorGeneric': 'Algo deu errado. Tente novamente.',
   'chat.errorWithMessage': 'Algo deu errado: {message}',
   'chat.errorEmptyReply': 'O agente terminou sem enviar uma resposta. Tente novamente.',
+  'chat.errorTurnLimited':
+    'Esta resposta parou antes do fim: o turno atingiu um limite configurado. Peça para continuar ou divida o pedido em etapas menores.',
   'chat.suggestionDayLabel': 'Que dia é hoje?',
   'chat.suggestionDayPrompt': 'Que dia é hoje, e quantos dias faltam para acabar o mês?',
   'chat.suggestionIdeaLabel': 'Pensar junto',

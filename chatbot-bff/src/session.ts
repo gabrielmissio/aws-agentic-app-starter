@@ -22,8 +22,9 @@ export const SESSION_SEPARATOR = '-'
  * for AgentCore conversation history, so prefixing every id with a hash of the caller's identity
  * stops a client constructing or replaying one that resolves to someone else's session.
  *
- * It is also what partitions conversation storage: everything under `<namespace>-` in the bucket
- * belongs to one person, and the namespace is unguessable without the `sub` it hashes.
+ * It is also what partitions conversation storage: the namespace is the AgentCore Memory `actorId`
+ * every read is scoped by, and the partition key of this caller's rows in the conversation index — and
+ * it is unguessable without the `sub` it hashes.
  */
 export function sessionNamespace(userId: string): string {
   return createHash('sha256').update(userId).digest('hex').slice(0, SESSION_NAMESPACE_LENGTH)
@@ -31,11 +32,11 @@ export function sessionNamespace(userId: string): string {
 
 /**
  * Whether this session id was minted for this caller. The single ownership check behind every route
- * that reads or deletes a conversation — a session id names an S3 prefix, so an unchecked one is a
- * path to another user's transcript.
+ * that reads or deletes a conversation — a session id names one conversation in AgentCore Memory, so
+ * an unchecked one is a path to another user's transcript.
  *
  * Length is part of the check, not a separate concern: a bare namespace with nothing after it is a
- * prefix that matches *all* of that caller's sessions rather than one of them.
+ * prefix that matches *all* of that caller's session ids rather than one of them.
  */
 export function belongsToCaller(candidate: unknown, userId: string): candidate is string {
   return (
