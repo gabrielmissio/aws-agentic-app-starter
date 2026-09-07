@@ -227,14 +227,17 @@ in `auth-stack.ts`.
 
 ### Model access is denied on the first message
 
-The deploy is green, all four stacks are up, and the first message in the chat comes back with this
-inside a streamed chunk:
+The deploy is green, all four stacks are up, and the first message in the chat answers with this
+instead of a reply:
 
 ```text
-Model access is denied due to IAM user or service role is not authorized to perform the required
-AWS Marketplace actions (aws-marketplace:ViewSubscriptions, aws-marketplace:Subscribe) to enable
-access to this model.
+Something went wrong: Model access is denied due to IAM user or service role is not authorized to
+perform the required AWS Marketplace actions (aws-marketplace:ViewSubscriptions,
+aws-marketplace:Subscribe) to enable access to this model.
 ```
+
+The same sentence is in the agent's log group as a `turn.failed` line carrying the correlation id,
+which is the copy to reach for when the report arrives second-hand.
 
 Nothing is misconfigured. Third-party models are sold through AWS Marketplace, and the **first**
 invocation of one in an account makes Bedrock create the subscription in the background — which

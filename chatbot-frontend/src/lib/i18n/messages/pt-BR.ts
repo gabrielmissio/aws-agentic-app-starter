@@ -88,6 +88,7 @@ export const ptBR = {
   'chat.statusUsingTool': 'Usando {tool}',
   'chat.errorGeneric': 'Algo deu errado. Tente novamente.',
   'chat.errorWithMessage': 'Algo deu errado: {message}',
+  'chat.errorEmptyReply': 'O agente terminou sem enviar uma resposta. Tente novamente.',
   'chat.suggestionDayLabel': 'Que dia é hoje?',
   'chat.suggestionDayPrompt': 'Que dia é hoje, e quantos dias faltam para acabar o mês?',
   'chat.suggestionIdeaLabel': 'Pensar junto',

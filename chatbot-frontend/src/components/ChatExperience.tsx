@@ -7,6 +7,7 @@ import { ThinkingBubble } from './ThinkingBubble.tsx'
 import { LanguageSwitcher } from './LanguageSwitcher.tsx'
 import { Alert, AppHeader, BrandAvatar, Button, CARD_CLASS } from './ui/index.ts'
 import { sendMessageBff } from '@/lib/api.ts'
+import { EmptyReplyError } from '@/lib/stream-parser.ts'
 import {
   deleteConversation,
   listConversations,
@@ -232,14 +233,25 @@ export function ChatExperience({ userEmail, isAdmin, onSignOut, onOpenAdmin }: C
       onStatus: (status: string) => patch((msg) => ({ ...msg, status })),
       onComplete: () =>
         patch((msg) => ({ ...msg, isStreaming: false, activeTool: undefined, status: undefined })),
-      onError: (error: Error) =>
+      onError: (error: Error) => {
+        // An empty reply carries no server message to show, so the UI supplies its own wording;
+        // anything else is quoted, because the sentence the model layer produced is the one that
+        // names the actual problem — a denied model, a throttle, a blocked completion.
+        const notice =
+          error instanceof EmptyReplyError
+            ? t('chat.errorEmptyReply')
+            : t('chat.errorWithMessage', { message: error.message })
+
         patch((msg) => ({
           ...msg,
-          content: msg.content || t('chat.errorWithMessage', { message: error.message }),
+          // Appended rather than substituted: a turn that failed halfway has real text in it, and
+          // replacing it would hide both what the agent managed to say and that it stopped.
+          content: msg.content ? `${msg.content}\n\n${notice}` : notice,
           isStreaming: false,
           activeTool: undefined,
           status: undefined,
-        })),
+        }))
+      },
     }
 
     try {
