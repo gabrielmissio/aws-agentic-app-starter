@@ -1,4 +1,6 @@
 import * as strands from '@strands-agents/sdk'
+import { createHash } from 'node:crypto'
+import { MAX_AGENT_OUTPUT_TOKENS } from './limits'
 import { createTools } from './tools'
 
 /**
@@ -45,6 +47,9 @@ const guardrailConfig = resolveGuardrail()
 const bedrockModel = new strands.BedrockModel({
   region: process.env.AWS_REGION || 'us-east-1',
   modelId: process.env.BEDROCK_MODEL_ID || 'us.anthropic.claude-sonnet-5',
+  // The hard ceiling on one response. `agentLimits` bounds the loop and is checked at turn
+  // boundaries, so it can be overshot by a single oversized reply; this is the cap that cannot be.
+  maxTokens: MAX_AGENT_OUTPUT_TOKENS,
   ...(guardrailConfig ? { guardrailConfig } : {}),
 })
 
@@ -90,6 +95,24 @@ claim about who someone is from the conversation.
 `.trim()
 
 /**
+ * A short digest of the prompt above, stamped on every span the agent raises.
+ *
+ * The prompt is the largest un-versioned input to a turn. The guardrail beside it is pinned to an
+ * immutable numbered version precisely so an edit cannot change what is enforced without a
+ * deployment and a record — the same argument applies here, and until now nothing carried it: a
+ * trace could not answer "which prompt produced this answer", so a regression reported from a pilot
+ * could not be tied to a revision.
+ *
+ * A content hash rather than a hand-maintained number, because a version someone has to remember to
+ * bump is a version that silently stops matching the prompt. Eight hex characters is enough to tell
+ * two revisions apart in a trace filter; it is an identity, not a checksum anyone verifies.
+ */
+export const systemPromptVersion = createHash('sha256')
+  .update(systemPrompt)
+  .digest('hex')
+  .slice(0, 8)
+
+/**
  * A fresh agent per request — never a shared one. A Strands `Agent` keeps its own `messages` array,
  * so one reused across requests on a warm container accumulates state *across callers*: one user's
  * conversation leaks into the next, and concurrent invocations interleave their appends.
@@ -108,7 +131,12 @@ export function createAgent(
     ...(messages ? { messages } : {}),
     // Stamped on every span this agent raises. `session.id` is the attribute CloudWatch's GenAI
     // Observability page groups a conversation by, so without it a trace is one turn floating free
-    // rather than a step in a session someone can replay.
-    ...(traceAttributes ? { traceAttributes } : {}),
+    // rather than a step in a session someone can replay. The prompt version rides along
+    // unconditionally — it is a property of the build, not of the request, so there is no turn it
+    // should be missing from.
+    traceAttributes: {
+      'gen_ai.system_instructions.version': systemPromptVersion,
+      ...traceAttributes,
+    },
   })
 }
