@@ -227,6 +227,31 @@ It is scaffolding, not a finished product. What is deliberately yours:
 * **The guardrail policy is a starting point.** The filters and PII entities in
   `infra/src/stacks/agent-stack.ts` are a defensible default, not an answer to your risk register —
   strengths, denied topics and blocked-message copy are all domain decisions.
+
+  Two things worth knowing before you rely on the PII entities, both observed in a real deployment
+  rather than reasoned about:
+
+  **PII anonymisation is not reliable on a streamed response.** With `action: 'ANONYMIZE'`, Bedrock
+  replaces a match with a marker like `{EMAIL}`. In synchronous mode — the default — the guardrail
+  *"buffers and applies the configured policies to one or more response chunks"*, so it evaluates
+  windows rather than the finished answer, and a value can be replaced in one window and survive in
+  the next. A real turn produced `Conta logada: {EMAIL}user@example.com.` — the marker and the
+  original, side by side. Asynchronous mode is not an escape: AWS states plainly that Guardrails
+  *"doesn't support the masking of sensitive information with asynchronous mode."* Nor does the SDK
+  compensate: Strands applies its own `redaction` only when the stop reason is `guardrail_intervened`,
+  which `ANONYMIZE` never produces because it masks instead of blocking. Treat PII anonymisation as
+  defence in depth, never as the control that keeps a value out of a response.
+
+  **`EMAIL` and `NAME` also fire on the signed-in user's own identity.** `get_signed_in_user` exists
+  to answer "who am I" to someone already authenticated, so anonymising there hides a caller's data
+  from the caller. The guardrail cannot tell a third party's PII from the requester's own. If your
+  agent is meant to state the user's identity back to them, drop those two entities and let
+  authentication and session scope carry that boundary — the structural identifiers (card, SSN,
+  keys) stay, because no legitimate turn echoes those.
+
+  What still protects telemetry either way is layered and does not depend on the guardrail:
+  `agent/src/span-redaction.ts` redacts tool arguments and results at the source, and the CloudWatch
+  data protection policy masks on write in both log groups.
 * **The agent runtime has no VPC.** `networkMode: 'PUBLIC'`, so a tool that reaches a backend does so
   over the internet with IAM as the only boundary. The current toolset makes no outbound calls; the
   day one does, that decision needs revisiting.
