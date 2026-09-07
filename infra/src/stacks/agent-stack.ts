@@ -758,14 +758,30 @@ export function createTelemetryDeliveries(
   for (const { logType, destinationType } of deliveries) {
     const slug = logType.toLowerCase().replace(/_/g, '-')
 
+    // `-agent-` in the name, and it has to stay there.
+    //
+    // A delivery source's `resourceArn` is immutable in the API but is *not* declared create-only in
+    // the CloudFormation schema — `Name` is the only property that is. So CloudFormation answers a
+    // changed ARN with an update rather than a replacement, and the service rejects it: "Update to
+    // existing Delivery Source with new ResourceId is not allowed." Any deployment that ever created
+    // these sources with a different ARN is therefore stuck until the name changes, which is the one
+    // lever that forces a replacement. `AWS::Logs::Delivery` declares `DeliverySourceName` as
+    // create-only, so the delivery attached to it is replaced in the same pass.
+    //
+    // The qualifier earns its place beyond that: AgentCore delivers logs for memory and gateway
+    // resources too, and an unqualified `${projectName}-application-logs` does not say which
+    // resource it describes. Names are capped at 60 characters, which this leaves room for.
     const source = new logs.CfnDeliverySource(scope, `AgentDeliverySource${logType}`, {
-      name: `${projectName}-${slug}`,
+      name: `${projectName}-agent-${slug}`,
       logType,
       resourceArn: runtimeArn,
     })
 
+    // Renamed alongside the source purely so the pair reads as a pair. Its `Name` is create-only
+    // too, so this is a replacement — a free one, since the delivery joining them is being replaced
+    // regardless, and a destination holds no state worth preserving.
     const destination = new logs.CfnDeliveryDestination(scope, `AgentDeliveryDestination${logType}`, {
-      name: `${projectName}-${slug}`,
+      name: `${projectName}-agent-${slug}`,
       deliveryDestinationType: destinationType,
       // X-Ray as a destination names no resource — the service is the destination. Passing a log
       // group ARN alongside it is what makes CloudFormation reject the delivery.

@@ -272,6 +272,43 @@ aws xray update-trace-segment-destination --destination CloudWatchLogs --region 
 Then wait for `ACTIVE` before re-running `cdk deploy`. Nothing needs to be rolled back or cleaned up
 first: the failed stack update leaves no partial delivery behind.
 
+### The deploy fails on a delivery source that "already exists"
+
+`cdk deploy` rolls back on the agent stack with:
+
+```text
+Resource handler returned message: "Update to existing Delivery Source with new ResourceId is not
+allowed. Please create a new Delivery Source instead. (Service: CloudWatchLogs, Status Code: 400)"
+(HandlerErrorCode: AlreadyExists)
+```
+
+You are upgrading from a version of this template whose delivery sources named the runtime with a
+wildcard ARN (`...:runtime/*`). That wildcard matched no runtime, so `APPLICATION_LOGS` and
+`USAGE_LOGS` were never actually delivered — the fix points the source at the real runtime ARN.
+
+CloudWatch Logs treats a delivery source's `resourceArn` as immutable, but the CloudFormation schema
+declares only `Name` as create-only. CloudFormation therefore attempts an update where it should
+have replaced, and the service refuses.
+
+The current template already resolves this: the sources are named `<project>-agent-<log-type>`, and
+changing the name is what makes CloudFormation replace rather than update. If you are on that version
+and still see this error, you have an older source lingering under the previous name. List them:
+
+```bash
+aws logs describe-delivery-sources --region <your region> \
+  --query 'deliverySources[?contains(name, `<project>`)].{name:name,arn:resourceArns[0]}'
+```
+
+Any entry whose ARN ends in `runtime/*` is the stale one. It is no longer referenced by the stack,
+carries no data, and can be deleted:
+
+```bash
+aws logs delete-delivery-source --name <stale name> --region <your region>
+```
+
+Delete the delivery that references it first if the call complains it is in use. The stack itself
+needs no cleanup — a rolled-back update leaves the previous, working configuration in place.
+
 ### Model access is denied on the first message
 
 The deploy is green, all four stacks are up, and the first message in the chat answers with this

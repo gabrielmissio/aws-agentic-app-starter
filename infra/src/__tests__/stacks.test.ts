@@ -968,6 +968,26 @@ describe('AgentStack — agent telemetry', () => {
    * pane to notice, only logs that quietly stay in AgentCore's default log group, outside every
    * control this stack applies. Hence a test on the shape of the ARN rather than on its presence.
    */
+  /**
+   * The name, pinned because it is load-bearing in a way names usually are not.
+   *
+   * `resourceArn` is immutable in the CloudWatch Logs API but is not declared create-only in the
+   * CloudFormation schema, where `Name` is the only create-only property. A changed ARN is therefore
+   * attempted as an update and refused — "Update to existing Delivery Source with new ResourceId is
+   * not allowed" — which is exactly what the wildcard fix hit on its first deploy. The name is the
+   * only lever that forces a replacement, so reverting it would strand every deployment that ever
+   * created these sources against a different ARN.
+   */
+  it('names the delivery source after the agent, which is what makes the ARN fix deployable', () => {
+    const { template } = synthObservability()
+
+    for (const source of Object.values(template.findResources('AWS::Logs::DeliverySource'))) {
+      const name = (source.Properties as { Name?: string }).Name ?? ''
+      expect(name).toMatch(/^test-agent-/)
+      expect(name.length).toBeLessThanOrEqual(60)
+    }
+  })
+
   it('registers the delivery source against the runtime, not a wildcard', () => {
     const { template } = synthObservability()
 
