@@ -97,11 +97,18 @@ claim about who someone is from the conversation.
  * Cheap to allocate — a prompt, a tool list and this conversation's prior turns. The expensive parts
  * are the module-level `bedrockModel` above and the shared client in `memory.ts`.
  */
-export function createAgent(messages?: strands.Message[]): strands.Agent {
+export function createAgent(
+  messages?: strands.Message[],
+  traceAttributes?: Record<string, string>,
+): strands.Agent {
   return new strands.Agent({
     systemPrompt,
     model: bedrockModel,
     tools: [...tools],
     ...(messages ? { messages } : {}),
+    // Stamped on every span this agent raises. `session.id` is the attribute CloudWatch's GenAI
+    // Observability page groups a conversation by, so without it a trace is one turn floating free
+    // rather than a step in a session someone can replay.
+    ...(traceAttributes ? { traceAttributes } : {}),
   })
 }

@@ -17,7 +17,7 @@ import { describe, expect, it } from 'vitest'
 import * as cdk from 'aws-cdk-lib'
 import * as kms from 'aws-cdk-lib/aws-kms'
 import { Match, Template } from 'aws-cdk-lib/assertions'
-import { bedrockModelResources } from '../stacks/agent-stack.js'
+import { bedrockModelResources, createObservability } from '../stacks/agent-stack.js'
 import { AuthStack } from '../stacks/auth-stack.js'
 import { BffStack } from '../stacks/bff-stack.js'
 import { FrontendStack } from '../stacks/frontend-stack.js'
@@ -42,6 +42,7 @@ function upstreamProps(scope: Construct) {
     memoryArn: FAKE_MEMORY_ARN,
     encryptionKey: kms.Key.fromKeyArn(scope, 'TestDataKey', FAKE_KEY_ARN),
     conversationRetentionDays: 30,
+    modelId: 'us.anthropic.claude-sonnet-5',
   }
 }
 
@@ -858,5 +859,203 @@ describe('the agent may invoke one model, not every model', () => {
     expect(source).not.toContain("resource: 'repository', resourceName: '*'")
     const describeBlock = source.slice(source.indexOf("sid: 'DescribeLogGroups'"))
     expect(describeBlock.slice(0, 600)).toContain('/aws/bedrock-agentcore/runtimes/*')
+  })
+})
+
+/**
+ * `AgentStack` itself cannot be constructed here — see the note at the top of this file — so the
+ * observability wiring is synthesized on its own, into a bare stack, the same way
+ * `bedrockModelResources` is exercised as a pure function.
+ */
+describe('AgentStack — agent telemetry', () => {
+  function synthObservability(retentionDays = 30) {
+    const app = new cdk.App()
+    const stack = new cdk.Stack(app, 'TestTelemetry', { env })
+    const key = new kms.Key(stack, 'Key')
+
+    const result = createObservability(stack, {
+      projectName: 'test',
+      encryptionKey: key,
+      retentionDays,
+      runtimeArn: 'arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/*',
+    })
+
+    return { result, template: Template.fromStack(stack) }
+  }
+
+  /**
+   * The destination half of the content policy. Origin-side redaction covers what the Bedrock
+   * guardrail cannot reach (tool arguments and results); this covers the prompt and completion that
+   * deliberately survive it, plus AgentCore's own `request_payload`, which is captured at HTTP
+   * ingress where no code of ours could have masked it.
+   */
+  it('masks personal and credential data in the telemetry log group', () => {
+    const { template } = synthObservability()
+
+    const policy = JSON.stringify(
+      Object.values(template.findResources('AWS::Logs::LogGroup'))[0]?.Properties,
+    )
+    for (const identifier of ['EmailAddress', 'Name', 'CreditCardNumber', 'AwsSecretKey']) {
+      expect(policy).toContain(identifier)
+    }
+  })
+
+  /**
+   * A log group whose retention outlived the conversation would be a second copy of the turn under a
+   * longer retention — quietly reopening the deletion promise the memory resource makes.
+   */
+  it('never keeps telemetry longer than the conversation it describes', () => {
+    for (const days of [1, 30, 90, 365]) {
+      const { template } = synthObservability(days)
+      template.hasResourceProperties('AWS::Logs::LogGroup', { RetentionInDays: days })
+    }
+  })
+
+  /** A retention CloudWatch does not offer rounds up, never down. */
+  it('rounds an unsupported retention up to the next supported one', () => {
+    const { template } = synthObservability(45)
+
+    template.hasResourceProperties('AWS::Logs::LogGroup', { RetentionInDays: 60 })
+  })
+
+  /**
+   * Without all three deliveries the corresponding panes of the GenAI Observability console are
+   * blank — and a blank pane reads as "the agent did nothing", not as "nothing was delivered".
+   */
+  it('delivers application logs, usage logs and traces', () => {
+    const { template } = synthObservability()
+
+    template.resourceCountIs('AWS::Logs::DeliverySource', 3)
+    template.resourceCountIs('AWS::Logs::Delivery', 3)
+    for (const logType of ['APPLICATION_LOGS', 'USAGE_LOGS', 'TRACES']) {
+      template.hasResourceProperties('AWS::Logs::DeliverySource', { LogType: logType })
+    }
+  })
+
+  /**
+   * X-Ray is the destination for spans, not a log group. Naming a resource ARN alongside it is what
+   * makes CloudFormation reject the delivery.
+   */
+  it('sends traces to X-Ray and the log types to the log group', () => {
+    const { template } = synthObservability()
+
+    const destinations = Object.values(template.findResources('AWS::Logs::DeliveryDestination'))
+    const xray = destinations.filter(
+      (d) => (d.Properties as { DeliveryDestinationType?: string }).DeliveryDestinationType === 'XRAY',
+    )
+
+    expect(xray).toHaveLength(1)
+    expect((xray[0]?.Properties as { DestinationResourceArn?: string }).DestinationResourceArn).toBeUndefined()
+  })
+
+  /**
+   * X-Ray writes spans into the log group on the agent's behalf, so the service needs the grant.
+   * Without it the endpoint accepts the batch and the spans never appear — the silent failure this
+   * wiring exists to avoid.
+   */
+  it('lets X-Ray deliver spans into the log group', () => {
+    const { template } = synthObservability()
+
+    const policy = JSON.stringify(
+      Object.values(template.findResources('AWS::Logs::ResourcePolicy'))[0]?.Properties,
+    )
+    expect(policy).toContain('xray.amazonaws.com')
+    expect(policy).toContain('logs:PutLogEvents')
+    // Scoped to this account, so the statement cannot be used from another one.
+    expect(policy).toContain('aws:SourceAccount')
+  })
+})
+
+describe('BffStack — operational visibility', () => {
+  function synthBff() {
+    const app = new cdk.App()
+    const auth = new AuthStack(app, 'TestAuth', { projectName: 'test', env })
+    const stack = new BffStack(app, 'TestBff', {
+      projectName: 'test',
+      userPool: auth.userPool,
+      throttle: { rateLimit: 10, burstLimit: 20 },
+      agentMetricNamespace: 'test/Agent',
+      ...upstreamProps(auth),
+      env,
+    })
+    return Template.fromStack(stack)
+  }
+
+  /**
+   * `logEvent` already emitted one JSON object per line, but Lambda's own START/END/REPORT lines and
+   * any stray `console` call stayed text — so a Logs Insights query filtering on a correlation id
+   * skipped them without saying so.
+   */
+  it('emits structured logs from every function', () => {
+    const template = synthBff()
+
+    const functions = Object.values(template.findResources('AWS::Lambda::Function'))
+    expect(functions.length).toBeGreaterThanOrEqual(3)
+    for (const fn of functions) {
+      const config = (fn.Properties as { LoggingConfig?: { LogFormat?: string } }).LoggingConfig
+      expect(config?.LogFormat).toBe('JSON')
+    }
+  })
+
+  /**
+   * The three original alarms all fire on an error. These fire on the failures that return 200 —
+   * which is the shape an agentic turn fails in most often.
+   */
+  it('alarms on the failures that do not raise an error', () => {
+    const template = synthBff()
+
+    for (const alarmName of [
+      'test-chat-latency',
+      'test-agent-throttles',
+      'test-agent-system-errors',
+      'test-bedrock-throttles',
+    ]) {
+      template.hasResourceProperties('AWS::CloudWatch::Alarm', { AlarmName: alarmName })
+    }
+  })
+
+  /** Every alarm has to reach the topic; one that only changes colour on a page nobody has open is not an alarm. */
+  it('routes every alarm to the notification topic', () => {
+    const template = synthBff()
+
+    for (const alarm of Object.values(template.findResources('AWS::CloudWatch::Alarm'))) {
+      expect((alarm.Properties as { AlarmActions?: unknown[] }).AlarmActions ?? []).not.toHaveLength(0)
+    }
+  })
+
+  it('builds a dashboard covering the turn, the runtime and the model', () => {
+    const template = synthBff()
+
+    template.resourceCountIs('AWS::CloudWatch::Dashboard', 1)
+    const body = JSON.stringify(
+      Object.values(template.findResources('AWS::CloudWatch::Dashboard'))[0]?.Properties,
+    )
+    expect(body).toContain('AWS/Bedrock-AgentCore')
+    expect(body).toContain('AWS/Bedrock')
+    // The token and tool metrics the assessment lists as absent — present once the agent exports them.
+    expect(body).toContain('GenAiAgentTokensInput')
+    expect(body).toContain('GenAiAgentToolErrorCount')
+  })
+
+  /**
+   * A widget charting a namespace nothing writes to renders as a flat zero, which reads as "the
+   * agent is idle" rather than "this was never switched on".
+   */
+  it('omits the agent row when the agent is not exporting metrics', () => {
+    const app = new cdk.App()
+    const auth = new AuthStack(app, 'TestAuth', { projectName: 'test', env })
+    const stack = new BffStack(app, 'TestBff', {
+      projectName: 'test',
+      userPool: auth.userPool,
+      throttle: { rateLimit: 10, burstLimit: 20 },
+      ...upstreamProps(auth),
+      env,
+    })
+
+    const body = JSON.stringify(
+      Object.values(Template.fromStack(stack).findResources('AWS::CloudWatch::Dashboard'))[0]
+        ?.Properties,
+    )
+    expect(body).not.toContain('GenAiAgentTokensInput')
   })
 })

@@ -52,7 +52,7 @@ metrics, and handler test coverage. None is the wide hole the first issue descri
 | Tests and quality gates | 4.0/5 | 349 tests of very high quality. The authorization surface of two of the three handlers and the gate's wiring are now covered (§12); the chat handler and measured coverage remain open. |
 | Security | 4.5/5 | Real least-privilege IAM, now with an own CMK across every store; missing mandatory WAF and network isolation. |
 | AWS infrastructure | 4.0/5 | 100% IaC, explicit dependencies, KMS shared across stacks; no VPC and no multi-account strategy. |
-| Observability | 3.5/5 | X-Ray on 3 Lambdas + stage, OTel in the agent, end-to-end correlation id, structured logging. Missing dashboard, SLO and business metrics. |
+| Observability | 4.5/5 | X-Ray on 3 Lambdas + stage, GenAI spans and token metrics from the agent in CloudWatch, one trace end to end via `traceparent`, dashboard, 7 alarms, structured logging. Missing a declared SLO and client-side RUM. |
 | Resilience | 3.0/5 | Conversation state is now durable (AgentCore Memory); per-session context ceiling. Missing retry, DLQ, reserved concurrency, DR. |
 | Scalability | 3.0/5 | The serverless layer scales; the agent no longer holds state in memory, but keeps AgentCore session affinity. |
 | Performance | 3.5/5 | End-to-end streaming and correct pooling decisions; nothing is measured. |
@@ -157,6 +157,10 @@ the same grouping the root README uses:
 - `RETAIN_DATA` must be `true`
 - `GUARDRAIL_ENABLED` must be `true` — nothing else in the stack inspects content, redacts PII or
   recognizes prompt injection *(new)*
+- `AGENT_OBSERVABILITY_ENABLED` must be `true` — the Lambdas and the stage are not where the turn is
+  decided; without the agent's spans there is no record of which tool ran or what it cost
+- `TRANSACTION_SEARCH_ENABLED` must be `true` — an acknowledgement, not a switch: nothing here creates
+  the account-level setting, and without it spans are accepted and then silently discarded
 - `TRACING_ENABLED` must be `true` — a wrong answer has to be reconstructable across all three
   runtimes *(new)*
 - `CONVERSATION_RETENTION_DAYS` must be set — conversations are recorded, so how long for is a
@@ -217,7 +221,7 @@ These were the first version's blockers. They were closed in commit `3ee31cb`
 |---|---|---|---|
 | **B1** | No Bedrock Guardrail | `createGuardrail` builds content filters (SEXUAL/VIOLENCE/HATE `HIGH`, INSULTS/MISCONDUCT `MEDIUM`), `PROMPT_ATTACK` input-only, and PII `ANONYMIZE` across 9 entities — **mandatory under `pilot`/`prod`** by the gate. A numbered, immutable version, pinned by the runtime. | `agent-stack.ts:439` `createGuardrail`, filters at `:460-483`; `config.ts` `GUARDRAIL_ENABLED` rule |
 | **B3** | No record of what the agent replied | Conversations recorded in **AgentCore Memory** (`CfnMemory`), with `eventExpiryDuration = CONVERSATION_RETENTION_DAYS` and `encryptionKeyArn` on the CMK. Isolation by `actorId` derived from the session namespace. One event per turn; what gets stored is already PII-anonymized. | `agent-stack.ts:165-172` `ConversationMemory`; `agent/src/memory.ts` |
-| **B4** | Zero distributed tracing | `TRACING_ENABLED` **mandatory under `pilot`/`prod`**: `lambda.Tracing.ACTIVE` on all three Lambdas and `tracingEnabled` on the stage. `agent/src/telemetry.ts` registers the SDK's OTel provider. **End-to-end correlation id**: minted in the browser (`X-Correlation-Id`), propagated as W3C baggage to the runtime, and written onto the turn. | `bff-stack.ts` `tracing`; `config.ts` `TRACING_ENABLED` rule; `agent/src/telemetry.ts` |
+| **B4** | Zero distributed tracing | `TRACING_ENABLED` **mandatory under `pilot`/`prod`**: `lambda.Tracing.ACTIVE` on all three Lambdas and `tracingEnabled` on the stage. `agent/src/telemetry.ts` exports the agent's GenAI spans to CloudWatch under `AGENT_OBSERVABILITY_ENABLED`, joined to the Lambda segment by a `traceparent` derived from it. **End-to-end correlation id**: minted in the browser (`X-Correlation-Id`), propagated as W3C baggage to the runtime, and written onto the turn. | `bff-stack.ts` `tracing`; `config.ts` `TRACING_ENABLED` rule; `agent/src/telemetry.ts` |
 | **B5** | No customer-managed key encryption | An own `kms.Key` (`DataKey`) created in `AgentStack` and shared with `BffStack`: DynamoDB tables `CUSTOMER_MANAGED`, log groups with `encryptionKey`, the SNS topic with `masterKey`, memory and guardrail on the same key. Key policies scoped per service and per account. | `agent-stack.ts` `DataKey`; `bff-stack.ts` `encryptionKey` |
 
 The **level-3 P1 blocker** (conversation state in container memory) was also resolved by the same
@@ -310,11 +314,13 @@ context ceiling (`agent/src/memory.ts`). The rest remain:
   metric reveals when the ceiling is hit.
 - **`evictStaleSessions()` being O(n)** stopped being a hot-path problem: per-container state was
   replaced by AgentCore Memory (`agent/src/index.ts` rewritten).
-- **No token telemetry and no cost attribution.** `cloudwatch:PutMetricData` is still granted to the
-  runtime; `agent/src/telemetry.ts` registers the Strands SDK's OTel provider, but it only exports
-  when `OTEL_EXPORTER_OTLP_ENDPOINT` points at a collector — which the template does not provide.
-  Without that collector it is still impossible to answer "which user spent the budget" or "what does
-  a conversation cost" from business/EMF metrics.
+- **Token telemetry now exists; per-user cost attribution still does not.** The agent exports
+  `GenAiAgentTokensInput`/`Output` and the per-tool counters as EMF, so "what does a conversation
+  cost" is answerable from the dashboard. "Which *user* spent the budget" is not: the metric
+  dimensions are the service and the tool name, deliberately — a `sub` as a metric dimension would
+  create one CloudWatch metric per user, which is both a cost multiplier and a way to put an
+  identifier somewhere with no retention policy. Answering it per-user means querying the spans by
+  `session.id`, not adding a dimension.
 - **The budget measures the whole account, not the project** — despite being named
   `${projectName}-monthly`. There is no `costFilters` on the `CfnBudget` (`bff-stack.ts:448`,
   `:456`). In a dedicated account — which is where `DEPLOY_ACCOUNT` pushes a pilot — that is the same
@@ -476,29 +482,52 @@ correct justification that they are disposable counters). The `cache-control` sp
 
 Missing: a VPC, endpoints, and a multi-account strategy.
 
-### 6.6 Observability — 3.5/5
+### 6.6 Observability — 4.5/5
 
 **Present:** X-Ray on all three Lambdas and on the API Gateway stage (under `TRACING_ENABLED`,
-mandatory in `pilot`/`prod`); an OTel provider registered in the agent container
-(`agent/src/telemetry.ts`); an **end-to-end correlation id** — minted in the browser
-(`X-Correlation-Id`), propagated as W3C baggage on the runtime invocation, and written onto the turn
-in AgentCore Memory, so the id a user quotes locates the exact exchange; structured JSON logging on
-the chat path (`logEvent`, `handler.ts`); 3 CloudWatch alarms with an encrypted SNS topic; API
-Gateway access logs (identity and outcome, no body); 30-day retention on log groups
-(`auth-stack.ts:193`); structured JSON auditing on the admin routes.
+mandatory in `pilot`/`prod`); **GenAI-convention spans and metrics exported from the agent container
+to CloudWatch** (under `AGENT_OBSERVABILITY_ENABLED`, likewise mandatory), reaching the CloudWatch
+GenAI Observability console; an **end-to-end correlation id** — minted in the browser
+(`X-Correlation-Id`), propagated as W3C baggage, and written onto the turn in AgentCore Memory; a
+**`traceparent`** derived from the Lambda's X-Ray segment (`correlation.ts`) and re-entered in the
+container (`telemetry.ts`), which makes the Lambda segment and the agent's spans *one* trace rather
+than two trees sharing a string; structured JSON logging on the chat path *and* on Lambda's own
+`START`/`END`/`REPORT` lines (`loggingFormat: JSON`); **7 CloudWatch alarms** with an encrypted SNS
+topic; an **operations dashboard**; API Gateway access logs; 30-day retention on log groups;
+structured JSON auditing on the admin routes.
 
-**Still absent:**
+**What the earlier version of this section got wrong.** It recorded the OTel provider as "registered"
+and the business metrics as blocked on "an external collector". Both were mistaken. The provider was
+gated on `OTEL_EXPORTER_OTLP_ENDPOINT`, which nothing in the stack ever set, so the deployed runtime
+was silent in every profile — the X-Ray and `PutMetricData` grants really were unused. And had that
+variable been set to a CloudWatch endpoint, the export would have failed anyway: the stock exporter
+does not sign SigV4. AWS has meanwhile retired the collector model for agent observability
+altogether. The gate is now `AGENT_OBSERVABILITY_ENABLED`, the exporter signs, and the metrics that
+were called absent turn out to have been emitted by Strands all along and merely never collected.
 
 | Property | State |
 |---|---|
-| CloudWatch dashboard | 0 resources |
-| Business/EMF metrics (tokens, cost per `sub`, invocations per tool) | not emitted — the OTel provider only exports with `OTEL_EXPORTER_OTLP_ENDPOINT` and an external collector |
-| Latency / throttle / Bedrock-error / quota-rejection alarms | absent (all 3 alarms are error alarms) |
-| A declared SLO | absent |
+| Agent spans in CloudWatch | present — SigV4 OTLP to the X-Ray endpoint, directed into the agent's own log group |
+| Business metrics (tokens, TTFT, per-tool calls, errors, duration) | present — Strands' own instruments, exported as EMF |
+| CloudWatch dashboard | present — turn health, AgentCore runtime, Bedrock, and the agent row |
+| Latency / throttle / Bedrock-error alarms | present — the failures that return 200, which the original three error alarms could not see |
+| Content policy on telemetry | layered: origin-side redaction of what the guardrail cannot reach, destination-side masking for the rest |
+| A declared SLO | **still absent** — see the deferred items below |
+| Client-side (RUM) telemetry | **still absent** — see the deferred items below |
 
-Tracing and the correlation id close what most separated level 2 from level 1 in the original issue.
-What remains is the *operating-against-an-objective* layer (dashboard, SLO, business metrics) — more
-relevant to public production than to a closed pilot.
+**Deferred, deliberately, with the reason recorded:**
+
+- **SLO via CloudWatch Application Signals.** `applicationsignals.CfnServiceLevelObjective` (with
+  `burnRateConfigurations`) is available in the pinned CDK, so the blocker is not tooling: it is that
+  an SLO needs a *number* — a target for turn availability and turn latency — and a number this
+  template picked would be the same kind of unchosen answer `CONVERSATION_RETENTION_DAYS` refuses to
+  supply. It also adds Application Signals' own bill. A fork adopting this should set the objective
+  from its own traffic, and alarm on burn rate rather than on the raw metric.
+- **CloudWatch RUM on the frontend.** It would complete browser → BFF → agent with real client
+  telemetry, and the `traceparent` chain is now in place to receive it. It is deferred because RUM
+  needs either an identity pool or an unauthenticated access policy, and *"the browser holds no AWS
+  credentials"* is one of this template's asserted invariants (`stacks.test.ts` — *creates no Cognito
+  Identity Pool*). Adopting RUM means deciding that trade deliberately, not by habit.
 
 ### 6.7 Resilience — 3.0/5
 
@@ -605,10 +634,10 @@ original issue and stay here as a record.
 | 4 | Mandatory WAF (or an explicit choice the gate demands) under `pilot`/`prod` (B6) | 2 | Security | S |
 | 5 | Custom domain + ACM + `TLSv1.2_2021` + WAF on CloudFront | 3 | Security | M |
 | 6 | SES connected (verified domain, DKIM, sandbox exit) | 3 | Infra | M |
-| 7 | Business metrics via EMF: tokens, cost per `sub`, invocations per tool (needs an OTLP collector) | 2, 3 | Observability / Cost | M |
+| ✅ | ~~Business metrics via EMF: tokens, invocations per tool~~ | 2, 3 | Observability / Cost | done — no collector was ever needed |
 | 8 | Retry/backoff + Bedrock throttling handling | 3 | Resilience | S |
 | 9 | Reserved concurrency + DLQ | 3 | Resilience | S |
-| 10 | Dashboard + SLOs + latency/throttle/Bedrock alarms | 3 | Observability | M |
+| 10 | SLOs via Application Signals — dashboard and latency/throttle/Bedrock alarms are done; the SLO needs a chosen target | 3 | Observability | S |
 | 11 | A per-session token ceiling + context summarization (the message ceiling already exists) | 3 | Cost | M |
 | 12 | An eval suite + system-prompt versioning | 3 | AI governance | L |
 | 13 | `CODEOWNERS` (the rest of the governance set now exists) | 1, 2 | Governance | XS |
@@ -703,10 +732,10 @@ exit 0).
 |---|---|---|
 | **B1** — no Bedrock Guardrail | ✅ Resolved | `createGuardrail` (content + PII `ANONYMIZE` + `PROMPT_ATTACK`), mandatory under `pilot`/`prod` |
 | **B3** — no record of what the agent replied | ✅ Resolved | AgentCore Memory with retention and a CMK; `agent/src/memory.ts` |
-| **B4** — zero distributed tracing | ✅ Resolved | X-Ray on 3 Lambdas + stage; OTel in the agent; end-to-end correlation id, mandatory under `pilot`/`prod` |
+| **B4** — zero distributed tracing | ✅ Resolved | X-Ray on 3 Lambdas + stage; the agent's spans exported to CloudWatch and joined to them by `traceparent`; end-to-end correlation id. Mandatory under `pilot`/`prod` |
 | **B5** — no CMK | ✅ Resolved | An own `DataKey` (KMS) shared across stacks, over conversations, tables, logs and the topic |
 | **P1 (level 3)** — conversation state in memory | ✅ Resolved | AgentCore Memory, durable, isolated by `actorId`, per-session context ceiling |
-| Profile gate with 6 rules | ✅ Extended to 9 | `GUARDRAIL_ENABLED`, `TRACING_ENABLED`, `CONVERSATION_RETENTION_DAYS` added |
+| Profile gate with 6 rules | ✅ Extended to 11 | `GUARDRAIL_ENABLED`, `TRACING_ENABLED`, `CONVERSATION_RETENTION_DAYS`, `AGENT_OBSERVABILITY_ENABLED`, `TRANSACTION_SEARCH_ENABLED` added |
 
 The test count moved from 249 to 319 across that revision.
 
@@ -821,11 +850,13 @@ conditions (4/5)** for this scenario, up from **conditionally ready (3/5)** at t
    absent table are not. For sensitive data, **cover those two paths before go-live** — it is low
    effort and closes the most consequential failure mode in the application runtime.
 
-**Operational prerequisites for go-live (independent of code):** `DEPLOY_PROFILE=pilot` with all 9
+**Operational prerequisites for go-live (independent of code):** `DEPLOY_PROFILE=pilot` with all 11
 rules satisfied (the gate guarantees this), `DEPLOY_ACCOUNT`/`DEPLOY_REGION` pinned, `WAF_ENABLED=true`
 (strongly recommended even though optional), `CONVERSATION_RETENTION_DAYS` agreed with the privacy
-function, and `OTEL_EXPORTER_OTLP_ENDPOINT` pointing at a collector if token/cost metrics are required
-during the pilot.
+function, and — the one step no gate can take for you — **CloudWatch Transaction Search enabled once
+for the account and Region** (`aws xray update-trace-segment-destination --destination CloudWatchLogs`).
+Without it, spans are accepted and discarded: the deployment looks healthy and the traces never
+appear. `TRANSACTION_SEARCH_ENABLED=true` is how the gate makes you say you did it.
 
 **Summary:** the go is viable. With WAF on and the network exception accepted in writing (given that
 the toolset performs no egress), items 2 and 3 are the difference between a conditional go and a

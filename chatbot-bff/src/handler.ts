@@ -3,7 +3,7 @@ import type { APIGatewayProxyEvent } from 'aws-lambda'
 import type { Writable } from 'node:stream'
 import { invokeAgentStream } from './agent-client.js'
 import { conversationIndexUpdate, deriveTitle, resolveRetentionDays } from './conversations.js'
-import { CORRELATION_HEADER, logEvent, resolveCorrelationId } from './correlation.js'
+import { CORRELATION_HEADER, logEvent, resolveCorrelationId, traceParentFrom } from './correlation.js'
 import { formatSseEvent, jsonHeaders, sseHeaders, validateMessage } from './http.js'
 import { checkRateLimit, resolveRateLimitConfig } from './rate-limit.js'
 import { resolveSessionId } from './session.js'
@@ -199,6 +199,12 @@ export const handler = awslambda.streamifyResponse(
         agentRuntimeArn: AGENT_RUNTIME_ARN,
         correlationId,
         ...(currentTraceId() ? { traceId: currentTraceId() as string } : {}),
+        // The same segment, in the format the agent's OTel propagator understands. Sending both is
+        // deliberate: `traceId` is what X-Ray and the AgentCore service span use, `traceParent` is
+        // what joins the container's spans to that same tree instead of starting a second one.
+        ...(traceParentFrom(process.env._X_AMZN_TRACE_ID)
+          ? { traceParent: traceParentFrom(process.env._X_AMZN_TRACE_ID) as string }
+          : {}),
       })
 
       const decoder = new TextDecoder()

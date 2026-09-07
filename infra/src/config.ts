@@ -159,6 +159,8 @@ export interface DeploymentPosture {
   retainData: boolean
   guardrailEnabled: boolean
   tracingEnabled: boolean
+  agentObservabilityEnabled: boolean
+  transactionSearchEnabled: boolean
   conversationRetentionDays?: number
 }
 
@@ -222,6 +224,18 @@ export function assertDeploymentPosture(p: DeploymentPosture): void {
     fail(
       'TRACING_ENABLED',
       'must be true. A wrong answer in a pilot has to be reconstructable across the browser, the BFF and the agent, and without tracing the only thing connecting them is a timestamp.',
+    )
+  }
+  if (!p.agentObservabilityEnabled) {
+    fail(
+      'AGENT_OBSERVABILITY_ENABLED',
+      'must be true. TRACING_ENABLED covers the Lambdas and the stage, but the agent is where the turn is actually decided — without it there is no record of which tool was called, how many tokens it cost, or where the latency went.',
+    )
+  }
+  if (!p.transactionSearchEnabled) {
+    fail(
+      'TRANSACTION_SEARCH_ENABLED',
+      'must be true, and it is an assertion rather than a switch: this template does not create the account-level setting, because a cdk destroy here must not turn off telemetry for every other workload in the account. Enable it once per account and Region (infra/README.md has the command), then set this to acknowledge it — spans are silently discarded without it.',
     )
   }
   if (!p.conversationRetentionDays) {
@@ -297,6 +311,38 @@ export function resolveGuardrailEnabled(input?: string): boolean {
  */
 export function resolveTracingEnabled(input?: string): boolean {
   return parseBoolean(input, false, 'TRACING_ENABLED')
+}
+
+/**
+ * Whether the agent container exports spans and token metrics to CloudWatch.
+ *
+ * Separate from `TRACING_ENABLED` because they are different bills on different resources: that one
+ * buys X-Ray on the Lambdas and the API stage, this one buys spans and metrics from inside the
+ * container, where the tool calls and the token counts are. Off by default, like every other billed
+ * posture here; required under `pilot`/`prod`.
+ *
+ * The name is AgentCore's own variable rather than one of ours, and it is passed to the container
+ * unchanged — so what turns telemetry on in the runtime and what turns it on in the stack cannot
+ * drift into disagreeing.
+ */
+export function resolveAgentObservabilityEnabled(input?: string): boolean {
+  return parseBoolean(input, false, 'AGENT_OBSERVABILITY_ENABLED')
+}
+
+/**
+ * An acknowledgement, not a switch: that CloudWatch Transaction Search is on for this account and
+ * Region.
+ *
+ * Nothing this template deploys creates it, deliberately. It is account-and-Region-wide state that
+ * other workloads also depend on, so a `cdk destroy` of this stack must not be able to switch off
+ * their telemetry — and its indexing percentage is a billing decision belonging to whoever owns the
+ * account, not to a template.
+ *
+ * It is gated anyway because it fails silently: without Transaction Search, spans are accepted and
+ * then discarded, so the deployment looks healthy and the traces simply never appear.
+ */
+export function resolveTransactionSearchEnabled(input?: string): boolean {
+  return parseBoolean(input, false, 'TRANSACTION_SEARCH_ENABLED')
 }
 
 /**

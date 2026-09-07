@@ -39,6 +39,10 @@ export interface BffStackProps extends cdk.StackProps {
   memoryArn: string
   /** TTL on the conversation index. Must match the memory resource's own expiry. */
   conversationRetentionDays: number
+  /** The model the agent invokes — dimensions the Bedrock throttle alarm and the dashboard. */
+  modelId: string
+  /** The namespace the agent's EMF metrics land in, when observability is on. Dashboard only. */
+  agentMetricNamespace?: string
   /** Whether X-Ray traces the functions and the stage. Required under `pilot`/`prod`. */
   tracingEnabled?: boolean
   /** Keeps the conversation index across a stack replacement, as the user pool does. */
@@ -66,6 +70,8 @@ export class BffStack extends cdk.Stack {
       memoryId,
       memoryArn,
       conversationRetentionDays,
+      modelId,
+      agentMetricNamespace,
       tracingEnabled = false,
       retainData = true,
     } = props
@@ -126,6 +132,13 @@ export class BffStack extends cdk.Stack {
       memorySize: 512,
       architecture: lambda.Architecture.X86_64,
       tracing,
+      // JSON rather than the default text. `logEvent` (chatbot-bff/src/correlation.ts) already emits
+      // one JSON object per line, but Lambda's own START/END/REPORT lines and any stray `console`
+      // call stayed unstructured — so a Logs Insights query filtering on a correlation id silently
+      // skipped them. `loggingFormat` also makes the level a queryable field rather than a prefix.
+      loggingFormat: lambda.LoggingFormat.JSON,
+      applicationLogLevelV2: lambda.ApplicationLogLevel.INFO,
+      systemLogLevelV2: lambda.SystemLogLevel.WARN,
       environment: {
         ALLOWED_ORIGIN: allowedOrigin,
         AGENT_RUNTIME_ARN: agentRuntimeArn,
@@ -283,6 +296,13 @@ export class BffStack extends cdk.Stack {
       memorySize: 256,
       architecture: lambda.Architecture.X86_64,
       tracing,
+      // JSON rather than the default text. `logEvent` (chatbot-bff/src/correlation.ts) already emits
+      // one JSON object per line, but Lambda's own START/END/REPORT lines and any stray `console`
+      // call stayed unstructured — so a Logs Insights query filtering on a correlation id silently
+      // skipped them. `loggingFormat` also makes the level a queryable field rather than a prefix.
+      loggingFormat: lambda.LoggingFormat.JSON,
+      applicationLogLevelV2: lambda.ApplicationLogLevel.INFO,
+      systemLogLevelV2: lambda.SystemLogLevel.WARN,
       environment: {
         ALLOWED_ORIGIN: allowedOrigin,
         COGNITO_USER_POOL_ID: userPool.userPoolId,
@@ -339,6 +359,13 @@ export class BffStack extends cdk.Stack {
       memorySize: 256,
       architecture: lambda.Architecture.X86_64,
       tracing,
+      // JSON rather than the default text. `logEvent` (chatbot-bff/src/correlation.ts) already emits
+      // one JSON object per line, but Lambda's own START/END/REPORT lines and any stray `console`
+      // call stayed unstructured — so a Logs Insights query filtering on a correlation id silently
+      // skipped them. `loggingFormat` also makes the level a queryable field rather than a prefix.
+      loggingFormat: lambda.LoggingFormat.JSON,
+      applicationLogLevelV2: lambda.ApplicationLogLevel.INFO,
+      systemLogLevelV2: lambda.SystemLogLevel.WARN,
       environment: {
         ALLOWED_ORIGIN: allowedOrigin,
         AGENTCORE_MEMORY_ID: memoryId,
@@ -438,11 +465,71 @@ export class BffStack extends cdk.Stack {
         evaluationPeriods: 1,
         treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
       }),
+      // Every alarm above fires on an error. These three fire on the failures that return 200:
+      // a conversation nobody waits for, a runtime refusing work it never reports as broken, and a
+      // model call the service rejects. Each was in the assessment's "still absent" list.
+      new cloudwatch.Alarm(this, 'ChatFunctionLatency', {
+        alarmName: `${projectName}-chat-latency`,
+        alarmDescription:
+          'The chat Lambda is slow. Nothing is erroring — users are abandoning the turn instead.',
+        // p95, not average: an average hides the tail, and the tail is what a user experiences as
+        // "it is broken". The threshold sits below the 60s function timeout so it warns rather than
+        // reporting a failure that already happened.
+        metric: fn.metricDuration({ period: cdk.Duration.minutes(5), statistic: 'p95' }),
+        threshold: cdk.Duration.seconds(45).toMilliseconds(),
+        evaluationPeriods: 2,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      }),
+      new cloudwatch.Alarm(this, 'AgentRuntimeThrottles', {
+        alarmName: `${projectName}-agent-throttles`,
+        alarmDescription:
+          'AgentCore is throttling invocations — the deployment is at a service quota, not broken.',
+        metric: agentRuntimeMetric('Throttles', projectName),
+        threshold: 1,
+        evaluationPeriods: 1,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      }),
+      new cloudwatch.Alarm(this, 'AgentRuntimeSystemErrors', {
+        alarmName: `${projectName}-agent-system-errors`,
+        alarmDescription:
+          'AgentCore is failing server-side. The chat Lambda may still be answering 200 with a failed turn.',
+        metric: agentRuntimeMetric('SystemErrors', projectName),
+        threshold: 1,
+        evaluationPeriods: 1,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      }),
+      new cloudwatch.Alarm(this, 'BedrockThrottles', {
+        alarmName: `${projectName}-bedrock-throttles`,
+        alarmDescription:
+          'Bedrock is throttling model calls — turns are failing for capacity, not for correctness.',
+        metric: new cloudwatch.Metric({
+          namespace: 'AWS/Bedrock',
+          metricName: 'InvocationThrottles',
+          dimensionsMap: { ModelId: modelId },
+          period: cdk.Duration.minutes(5),
+          statistic: 'Sum',
+        }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      }),
     ]
 
     for (const alarm of alarms) {
       alarm.addAlarmAction(new cwactions.SnsAction(alarmTopic))
     }
+
+    // ── Operations: one page to answer "is it healthy, and what is it costing" ──
+    // The alarms above say something is wrong. This says what, and it is the artefact an operator
+    // opens first — which is why the rows are ordered the way an incident actually unfolds: what the
+    // user experienced, then which layer produced it, then what the model was doing.
+    createDashboard(this, {
+      projectName,
+      api,
+      chatFunction: fn,
+      modelId,
+      agentMetricNamespace,
+    })
 
     // A budget alerts; it cannot stop spend. It also measures the WHOLE ACCOUNT, not this project,
     // despite the name: there is no `costFilters` below.
@@ -549,4 +636,161 @@ function attachWebAcl(scope: Construct, projectName: string, api: apigateway.Res
   })
   // CloudFormation cannot infer the ordering from `stageArn`, which is a token either way.
   association.node.addDependency(api.deploymentStage)
+}
+
+/**
+ * One AgentCore runtime metric.
+ *
+ * AgentCore dimensions these by the runtime's *name*, not its ARN — and `AgentStack` builds that
+ * name from the project name with hyphens replaced, so the same transformation has to happen here.
+ * Written as a helper rather than inlined four times because getting that transformation wrong
+ * produces an alarm that never fires, which looks exactly like an alarm that never needed to.
+ */
+function agentRuntimeMetric(metricName: string, projectName: string): cloudwatch.Metric {
+  return new cloudwatch.Metric({
+    namespace: 'AWS/Bedrock-AgentCore',
+    metricName,
+    dimensionsMap: { AgentRuntimeName: projectName.replaceAll('-', '_') },
+    period: cdk.Duration.minutes(5),
+    statistic: 'Sum',
+  })
+}
+
+/**
+ * The operational dashboard.
+ *
+ * Deliberately not a widget per metric: a page with forty graphs is one nobody reads under pressure.
+ * Three rows, each answering one question, in the order an incident is actually diagnosed.
+ *
+ * The agent row is present only when `agentObservabilityEnabled` put those metrics there. A widget
+ * charting a namespace nothing writes to renders as a flat line at zero, which reads as "the agent
+ * is idle" rather than "this was never switched on" — the more dangerous of the two.
+ */
+function createDashboard(
+  scope: Construct,
+  options: {
+    projectName: string
+    api: apigateway.RestApi
+    chatFunction: lambda.Function
+    modelId: string
+    agentMetricNamespace?: string
+  },
+): cloudwatch.Dashboard {
+  const { projectName, api, chatFunction, modelId, agentMetricNamespace } = options
+  const period = cdk.Duration.minutes(5)
+
+  const agentMetric = (metricName: string, statistic: string) =>
+    new cloudwatch.Metric({
+      namespace: agentMetricNamespace ?? '',
+      metricName,
+      dimensionsMap: { ServiceName: `${projectName}-agent` },
+      period,
+      statistic,
+    })
+
+  const dashboard = new cloudwatch.Dashboard(scope, 'OperationsDashboard', {
+    dashboardName: `${projectName}-operations`,
+    defaultInterval: cdk.Duration.hours(3),
+  })
+
+  // Row 1 — what the user got. Latency is p50 beside p95 on purpose: the gap between them is what
+  // separates "everyone is waiting" from "a few turns are stuck", and those have different causes.
+  dashboard.addWidgets(
+    new cloudwatch.GraphWidget({
+      title: 'Turns — requests and failures',
+      width: 12,
+      left: [api.metricCount({ period }), api.metricServerError({ period })],
+      right: [chatFunction.metricErrors({ period })],
+    }),
+    new cloudwatch.GraphWidget({
+      title: 'Turn latency (p50 / p95)',
+      width: 12,
+      left: [
+        chatFunction.metricDuration({ period, statistic: 'p50', label: 'p50' }),
+        chatFunction.metricDuration({ period, statistic: 'p95', label: 'p95' }),
+      ],
+    }),
+  )
+
+  // Row 2 — which layer produced it. AgentCore's throttles and errors are the ones the chat Lambda
+  // can answer 200 over, so a turn can fail here with nothing above it looking wrong.
+  dashboard.addWidgets(
+    new cloudwatch.GraphWidget({
+      title: 'AgentCore runtime',
+      width: 12,
+      left: [
+        agentRuntimeMetric('Invocations', projectName),
+        agentRuntimeMetric('Throttles', projectName),
+        agentRuntimeMetric('SystemErrors', projectName),
+        agentRuntimeMetric('UserErrors', projectName),
+      ],
+      right: [agentRuntimeMetric('SessionCount', projectName)],
+    }),
+    new cloudwatch.GraphWidget({
+      title: 'Bedrock model',
+      width: 12,
+      left: [
+        new cloudwatch.Metric({
+          namespace: 'AWS/Bedrock',
+          metricName: 'InvocationThrottles',
+          dimensionsMap: { ModelId: modelId },
+          period,
+          statistic: 'Sum',
+        }),
+        new cloudwatch.Metric({
+          namespace: 'AWS/Bedrock',
+          metricName: 'InvocationServerErrors',
+          dimensionsMap: { ModelId: modelId },
+          period,
+          statistic: 'Sum',
+        }),
+      ],
+      right: [
+        new cloudwatch.Metric({
+          namespace: 'AWS/Bedrock',
+          metricName: 'InvocationLatency',
+          dimensionsMap: { ModelId: modelId },
+          period,
+          statistic: 'p95',
+        }),
+      ],
+    }),
+  )
+
+  if (!agentMetricNamespace) return dashboard
+
+  // Row 3 — what the model was doing. These come from instruments Strands already emitted and
+  // nothing collected: the assessment lists them as absent business metrics, and they were only
+  // ever unexported. Tokens are the cost line; time-to-first-token is what the user calls "slow"
+  // even when the total is fine; tool errors are the failure that reaches the answer as a
+  // confident wrong one rather than as an error.
+  dashboard.addWidgets(
+    new cloudwatch.GraphWidget({
+      title: 'Tokens',
+      width: 8,
+      left: [
+        agentMetric('GenAiAgentTokensInput', 'Sum'),
+        agentMetric('GenAiAgentTokensOutput', 'Sum'),
+      ],
+    }),
+    new cloudwatch.GraphWidget({
+      title: 'Time to first token / model latency',
+      width: 8,
+      left: [
+        agentMetric('GenAiServerTimeToFirstToken', 'Average'),
+        agentMetric('GenAiAgentModelLatency', 'Average'),
+      ],
+    }),
+    new cloudwatch.GraphWidget({
+      title: 'Tool calls and errors',
+      width: 8,
+      left: [
+        agentMetric('GenAiAgentToolCallCount', 'Sum'),
+        agentMetric('GenAiAgentToolErrorCount', 'Sum'),
+      ],
+      right: [agentMetric('GenAiAgentToolDuration', 'Average')],
+    }),
+  )
+
+  return dashboard
 }

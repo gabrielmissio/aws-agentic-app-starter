@@ -103,8 +103,9 @@ because a conditional check-and-increment is the only operation the code perform
 | `WAF_ENABLED` | A web ACL on the API stage. Off in every profile — the only layer that filters *before* authentication |
 | `GUARDRAIL_ENABLED` | A Bedrock guardrail on model input and output: content filters, prompt-attack detection, PII anonymization. Off by default (billed per text unit); **required** under `pilot`/`prod` |
 | `TRACING_ENABLED` | X-Ray on the API stage and all three Lambdas. Off by default (billed per trace); **required** under `pilot`/`prod` |
-| `CONVERSATION_RETENTION_DAYS` | How long a conversation is kept. Sets `eventExpiryDuration` on the memory resource and the TTL on the index rows. **Required** under `pilot`/`prod`, with no default — the answer is yours |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | Where the agent container exports spans and token metrics. Passed through untouched; unset, the container's instruments stay silent while the Lambdas still trace |
+| `AGENT_OBSERVABILITY_ENABLED` | Spans and token/tool metrics from inside the agent container, plus its telemetry log group, masking policy and vended-log deliveries. Off by default; **required** under `pilot`/`prod`. AgentCore's own variable name, passed through unchanged |
+| `TRANSACTION_SEARCH_ENABLED` | An **acknowledgement** that CloudWatch Transaction Search is on for this account and Region — nothing here creates it. **Required** under `pilot`/`prod`, because without it spans are accepted and then silently discarded. Verify with `aws xray get-trace-segment-destination` before deploying: it must read `CloudWatchLogs` **and** `ACTIVE` — see [Troubleshooting](#troubleshooting) |
+| `CONVERSATION_RETENTION_DAYS` | How long a conversation is kept. Sets `eventExpiryDuration` on the memory resource, the TTL on the index rows, and the retention on the agent's telemetry log group, so a trace never outlives the turn it describes. **Required** under `pilot`/`prod`, with no default — the answer is yours |
 | `MEMORY_MAX_MESSAGES` | How much history is replayed into a turn, default `40`. Every turn re-sends its context, so this bounds what a long conversation costs |
 | `APP_URL` | Canonical app URL for the emails. Unset, falls back to what `frontend` published to SSM |
 | `RETAIN_DATA` | `true` (default): the user pool and frontend bucket survive `cdk destroy` |
@@ -224,6 +225,52 @@ which an invite flow cannot use). Then add
 in `auth-stack.ts`.
 
 ## Troubleshooting
+
+### The deploy fails on an X-Ray delivery destination
+
+`cdk deploy` rolls back on the agent stack with:
+
+```text
+Resource handler returned message: "X-Ray Delivery Destination is supported with CloudWatch Logs as
+a Trace Segment Destination. Please enable the CloudWatch Logs destination for your traces using the
+UpdateTraceSegmentDestination API" (Service: CloudWatchLogs, Status Code: 400)
+```
+
+The `TRACES` delivery in `agent-stack.ts` is asking X-Ray to file this agent's spans, and X-Ray only
+accepts that once the **account's** trace segment destination is CloudWatch Logs. That is not
+something this stack sets — see the note on `TRANSACTION_SEARCH_ENABLED` above for why a template
+must not reach into account-wide state.
+
+Two things make this easy to hit even when you believe Transaction Search is on:
+
+- **It is three settings, not one.** The console's *Enable Transaction Search* button applies a
+  CloudWatch Logs resource policy, the trace segment destination, and an indexing rule together. A
+  session saved in a different Region, or one that did not complete, can leave the destination on
+  `XRay` while the rest looks configured.
+- **It is applied asynchronously.** The destination reports `PENDING` for up to ~10 minutes, and a
+  deploy against `PENDING` fails with this exact message — indistinguishable from never having
+  enabled it.
+
+Check which of the two you are in:
+
+```bash
+aws xray get-trace-segment-destination --region <your region>
+```
+
+| Output | Meaning |
+|---|---|
+| `"Destination": "XRay"` | Not enabled in this Region. Run the `update` below |
+| `"Destination": "CloudWatchLogs"`, `"Status": "PENDING"` | Enabled, still propagating. Wait and retry the deploy — nothing to fix |
+| `"Destination": "CloudWatchLogs"`, `"Status": "ACTIVE"` | Ready. If the deploy still fails, check the Region matches `DEPLOY_REGION` |
+
+To set it — once per account and Region, with an identity that has X-Ray admin rights:
+
+```bash
+aws xray update-trace-segment-destination --destination CloudWatchLogs --region <your region>
+```
+
+Then wait for `ACTIVE` before re-running `cdk deploy`. Nothing needs to be rolled back or cleaned up
+first: the failed stack update leaves no partial delivery behind.
 
 ### Model access is denied on the first message
 

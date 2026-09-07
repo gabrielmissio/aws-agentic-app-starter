@@ -61,8 +61,29 @@ redacted text the version that reaches storage.
 
 The Strands `Agent` emits spans and token/tool metrics on its own, but they reach a no-op provider
 until one is registered. [`src/telemetry.ts`](src/telemetry.ts) registers it when
-`OTEL_EXPORTER_OTLP_ENDPOINT` is set — the standard variable, so a runtime that already has a
-collector needs nothing else.
+`AGENT_OBSERVABILITY_ENABLED=true` — AgentCore's own variable, set by the stack rather than by hand.
+
+**There is no collector.** The gate used to be `OTEL_EXPORTER_OTLP_ENDPOINT`, a collector's address,
+and that encoded a model AWS has since retired: its documentation now states that the ADOT Collector
+is not supported for agent observability. The supported path is a direct, SigV4-signed export to
+regional CloudWatch endpoints — which is also why the stock `@opentelemetry/exporter-trace-otlp-http`
+could not be used even if the address were set. It does not sign, so the endpoint answers 403 and the
+spans vanish with nothing in the log group to say why.
+
+The two signals leave by different routes, for different reasons:
+
+| Signal | Route | Why |
+|---|---|---|
+| Spans | SigV4 OTLP → `xray.<region>.amazonaws.com/v1/traces` ([`otlp-sigv4.ts`](src/otlp-sigv4.ts)) | Transaction Search indexes them for the CloudWatch GenAI Observability console. Directed by header into the agent's *own* log group, not the shared `aws/spans`, so a retention, the deployment's CMK and a masking policy reach them |
+| Metrics | EMF → the same log group ([`emf-metrics.ts`](src/emf-metrics.ts)) | CloudWatch's metrics OTLP endpoint feeds the PromQL store, not the namespace/dimension metrics an alarm and a dashboard widget are built on |
+
+**What is not exported.** [`src/span-redaction.ts`](src/span-redaction.ts) strips tool arguments and
+tool results before anything reaches the wire — `get_signed_in_user` returns the caller's email, and
+the Bedrock guardrail does not cover it: the guardrail sits on model input and output, opens the
+model span *before* the call, and only redacts when it actually intervened. The model prompt and
+completion deliberately survive, because a trace that cannot reconstruct the decision is the
+anti-pattern Well-Architected's Agentic AI Lens names; the log group's data protection policy masks
+them at the destination instead.
 
 It installs `AsyncLocalStorageContextManager` explicitly rather than letting the SDK reach for
 `NodeTracerProvider`: that package pulls `@opentelemetry/propagator-jaeger`, which carries a

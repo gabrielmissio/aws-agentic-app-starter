@@ -57,6 +57,8 @@ export interface InvokeAgentInput {
   correlationId?: string
   /** The X-Ray root from the Lambda's own segment, when active tracing is on. */
   traceId?: string
+  /** The same segment as a W3C `traceparent`, which is what the container's spans attach to. */
+  traceParent?: string
 }
 
 export async function invokeAgentStream(input: InvokeAgentInput): Promise<AsyncIterable<Uint8Array>> {
@@ -69,6 +71,7 @@ export async function invokeAgentStream(input: InvokeAgentInput): Promise<AsyncI
     // application-defined context, so our own id travels there rather than being squeezed into a
     // trace id the platform assigns meaning to.
     ...(input.traceId ? { traceId: input.traceId } : {}),
+    ...(input.traceParent ? { traceParent: input.traceParent } : {}),
     ...(input.correlationId ? { baggage: `correlationId=${input.correlationId}` } : {}),
     payload: new TextEncoder().encode(input.message),
   })
