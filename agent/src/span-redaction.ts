@@ -78,30 +78,38 @@ function stripIdentityBlock(value: string): string {
 }
 
 /**
- * A sanitized copy of one span. Pure, so the rule can be asserted against a literal span rather than
- * through an exporter and a transport.
+ * Sanitizes one span **in place** and returns it.
+ *
+ * In place, and not `{ ...span, attributes, events }`, which is what this did first and what broke
+ * every export in the first deployment: a `ReadableSpan` is a class instance, spreading it copies own
+ * properties but not prototype methods, and the OTLP serializer calls `span.spanContext()` on the
+ * result. The exporter caught the `TypeError`, failed closed as designed, and dropped every batch —
+ * so the redaction was working and the telemetry was silently going nowhere.
+ *
+ * Mutation is safe here precisely because of where this runs. The batch processor has already
+ * collected these spans and hands them to the exporter to be serialized and discarded; nothing reads
+ * them again, and a retry of the same batch should send the redacted form anyway.
  */
 export function redactSpan(span: ReadableSpan): ReadableSpan {
   const tool = isToolSpan(span)
 
-  const attributes = Object.fromEntries(
-    Object.entries(span.attributes).map(([key, value]) => {
-      if (tool && TOOL_CONTENT_ATTRIBUTES.includes(key)) return [key, REDACTED]
-      return [key, typeof value === 'string' ? stripIdentityBlock(value) : value]
-    }),
-  )
+  const attributes = span.attributes as Record<string, unknown>
+  for (const [key, value] of Object.entries(attributes)) {
+    if (tool && TOOL_CONTENT_ATTRIBUTES.includes(key)) attributes[key] = REDACTED
+    else if (typeof value === 'string') attributes[key] = stripIdentityBlock(value)
+  }
 
-  const events = span.events.map((event) => ({
-    ...event,
-    attributes: Object.fromEntries(
-      Object.entries(event.attributes ?? {}).map(([key, value]) => {
-        if (tool && TOOL_CONTENT_EVENT_KEYS.includes(key)) return [key, REDACTED]
-        return [key, typeof value === 'string' ? stripIdentityBlock(value) : value]
-      }),
-    ),
-  }))
+  for (const event of span.events) {
+    const eventAttributes = event.attributes as Record<string, unknown> | undefined
+    if (!eventAttributes) continue
 
-  return { ...span, attributes, events }
+    for (const [key, value] of Object.entries(eventAttributes)) {
+      if (tool && TOOL_CONTENT_EVENT_KEYS.includes(key)) eventAttributes[key] = REDACTED
+      else if (typeof value === 'string') eventAttributes[key] = stripIdentityBlock(value)
+    }
+  }
+
+  return span
 }
 
 /**

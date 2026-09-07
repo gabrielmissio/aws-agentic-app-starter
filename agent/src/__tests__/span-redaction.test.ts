@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { ReadableSpan, SpanExporter } from '@opentelemetry/sdk-trace-base'
 import { ExportResultCode } from '@opentelemetry/core'
+import { BasicTracerProvider } from '@opentelemetry/sdk-trace-base'
+import { JsonTraceSerializer } from '@opentelemetry/otlp-transformer'
 import { REDACTED, RedactingSpanExporter, redactSpan } from '../span-redaction'
 import { formatSessionContext } from '../caller'
 
@@ -143,5 +145,60 @@ describe('RedactingSpanExporter', () => {
 
     expect(inner.export).not.toHaveBeenCalled()
     expect(result).toHaveBeenCalledWith(expect.objectContaining({ code: ExportResultCode.FAILED }))
+  })
+})
+
+/**
+ * The regression that cost a deployment.
+ *
+ * The literal spans above are plain objects, so they never exercised the contract the exporter
+ * actually has: a `ReadableSpan` is a class instance and the OTLP serializer calls `spanContext()`
+ * on it. `redactSpan` used to return `{ ...span, ... }`, which drops prototype methods — the
+ * serializer threw, the exporter failed closed as designed, and every batch was silently discarded
+ * while `metrics` kept flowing and nothing looked wrong.
+ *
+ * Driving a real span through a real serializer is the only shape of test that catches it.
+ */
+describe('redaction against a real span', () => {
+  function realSpan(attributes: Record<string, string>): ReadableSpan {
+    const provider = new BasicTracerProvider()
+    const span = provider.getTracer('test').startSpan('execute_tool')
+    span.setAttributes(attributes)
+    span.end()
+    return span as unknown as ReadableSpan
+  }
+
+  it('leaves the span serializable after redacting it', () => {
+    const span = realSpan({
+      'gen_ai.operation.name': 'execute_tool',
+      'gen_ai.tool.call.result': '{"email":"person@example.com"}',
+    })
+
+    const redacted = redactSpan(span)
+
+    // The method the serializer needs has to survive — this is what the spread destroyed.
+    expect(typeof redacted.spanContext).toBe('function')
+    expect(() => JsonTraceSerializer.serializeRequest([redacted])).not.toThrow()
+
+    const wire = new TextDecoder().decode(JsonTraceSerializer.serializeRequest([redacted]))
+    expect(wire).toContain(REDACTED)
+    expect(wire).not.toContain('person@example.com')
+  })
+
+  it('reaches the inner exporter through the decorator, still serializable', () => {
+    const captured: ReadableSpan[] = []
+    const inner: SpanExporter = {
+      export: (spans) => captured.push(...spans),
+      shutdown: async () => {},
+    }
+
+    new RedactingSpanExporter(inner).export(
+      [realSpan({ 'gen_ai.operation.name': 'execute_tool', 'gen_ai.tool.call.result': 'secret' })],
+      () => {},
+    )
+
+    expect(captured).toHaveLength(1)
+    expect(() => JsonTraceSerializer.serializeRequest(captured)).not.toThrow()
+    expect(captured[0]?.attributes['gen_ai.tool.call.result']).toBe(REDACTED)
   })
 })
