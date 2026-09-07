@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { EmptyReplyError, parseAgentCoreStream, type StreamCallbacks } from '../lib/stream-parser'
+import {
+  EmptyReplyError,
+  parseAgentCoreStream,
+  TurnLimitError,
+  type StreamCallbacks,
+} from '../lib/stream-parser'
 
 function makeCallbacks() {
   const tokens: string[] = []
@@ -57,6 +62,9 @@ const textDelta = (text: string) =>
     type: 'modelStreamUpdateEvent',
     event: { type: 'modelContentBlockDeltaEvent', delta: { type: 'textDelta', text } },
   })}\n\n`
+
+const agentResult = (stopReason: string) =>
+  `data: ${JSON.stringify({ type: 'agentResultEvent', result: { stopReason } })}\n\n`
 
 const messageStop = (stopReason: string) =>
   `data: ${JSON.stringify({
@@ -192,6 +200,76 @@ describe('parseAgentCoreStream', () => {
     expect(c.errors).toHaveLength(1)
     expect(c.errors[0]).toBeInstanceOf(EmptyReplyError)
     expect(c.completed).toBe(1)
+  })
+
+  /**
+   * The worse half of the silent-failure pair. A capped turn produces text and then stops, so the
+   * answer reads as finished — often mid-task, right after the model asked for a tool the loop then
+   * refused to run. Nothing errors and the runtime answers 200, so without this the only record is a
+   * log line in the agent's log group that the person reading the answer cannot see.
+   */
+  it('names a turn the agent loop cut short at a cap, keeping the text it did produce', async () => {
+    const c = makeCallbacks()
+
+    await parseAgentCoreStream(
+      sseResponse([
+        textDelta('Step one is done, next I will'),
+        // The last model call ended ordinarily; the cap lands on the *result*, which is the only
+        // place a per-invocation limit surfaces.
+        messageStop('toolUse'),
+        agentResult('limitTurns'),
+      ]),
+      c.callbacks,
+    )
+
+    expect(c.errors).toHaveLength(1)
+    expect(c.errors[0]).toBeInstanceOf(TurnLimitError)
+    expect((c.errors[0] as TurnLimitError).stopReason).toBe('limitTurns')
+    // The partial answer survives — replacing it would hide both what the agent managed to say and
+    // that it stopped.
+    expect(c.text).toBe('Step one is done, next I will')
+    expect(c.completed).toBe(1)
+  })
+
+  // The model's own per-response ceiling, which arrives on the message stop rather than the result.
+  it('names a response the model truncated at its token ceiling', async () => {
+    const c = makeCallbacks()
+
+    await parseAgentCoreStream(
+      sseResponse([textDelta('A very long answer that runs'), messageStop('maxTokens')]),
+      c.callbacks,
+    )
+
+    expect(c.errors[0]).toBeInstanceOf(TurnLimitError)
+    expect((c.errors[0] as TurnLimitError).stopReason).toBe('maxTokens')
+  })
+
+  // A cap that did not fire must stay silent, or every ordinary turn grows a warning.
+  it('reports no limit error for a turn that finished on its own', async () => {
+    const c = makeCallbacks()
+
+    await parseAgentCoreStream(
+      sseResponse([textDelta('done'), messageStop('endTurn'), agentResult('endTurn')]),
+      c.callbacks,
+    )
+
+    expect(c.errors).toEqual([])
+    expect(c.completed).toBe(1)
+  })
+
+  // A reported failure is the more specific explanation, so a cap must not add a second notice.
+  it('prefers a reported failure over the cap notice', async () => {
+    const c = makeCallbacks()
+
+    await parseAgentCoreStream(
+      sseResponse([
+        `data: ${JSON.stringify({ type: 'afterModelCallEvent', error: { message: 'model denied' } })}\n\n`,
+        agentResult('limitTurns'),
+      ]),
+      c.callbacks,
+    )
+
+    expect(c.errors.map((error) => error.message)).toEqual(['model denied'])
   })
 
   it('reports no empty-reply error when the turn actually replied', async () => {

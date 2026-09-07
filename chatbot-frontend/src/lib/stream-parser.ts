@@ -16,6 +16,36 @@ export class EmptyReplyError extends Error {
   }
 }
 
+/**
+ * The turn was cut short by one of the agent's configured ceilings rather than finishing.
+ *
+ * Also a silent failure, and a worse one than an empty reply: text *was* produced, so the answer looks
+ * complete and simply stops — often mid-task, right after the model asked for a tool the loop then
+ * refused to run. Nothing errors, the runtime answers 200, and the only other record is a
+ * `turn.limited` line in the agent's log group, which the person reading the answer cannot see.
+ */
+export class TurnLimitError extends Error {
+  constructor(readonly stopReason: string) {
+    super(`The turn stopped at a configured ceiling (${stopReason}).`)
+    this.name = 'TurnLimitError'
+  }
+}
+
+/**
+ * Stop reasons that mean a ceiling fired, not that the model was done.
+ *
+ * `limit*` come from the per-invocation caps in `agent/src/limits.ts`; `maxTokens` comes from the
+ * model's own per-response cap. Restated here rather than imported because the agent and the frontend
+ * are separate packages — the same reason `ACTOR_ID_LENGTH` is restated — and because these are the
+ * SDK's spellings, not ours.
+ */
+const TRUNCATING_STOP_REASONS = new Set([
+  'limitTurns',
+  'limitTotalTokens',
+  'limitOutputTokens',
+  'maxTokens',
+])
+
 export interface StreamCallbacks {
   /** One visible text token, with `<thinking>` already stripped. */
   onToken: (text: string) => void
@@ -126,6 +156,8 @@ export async function parseAgentCoreStream(
   /** Whether the model produced any text this turn, and whether a failure was already reported. */
   let produced = false
   let failed = false
+  /** The ceiling that ended the turn, if one did. See `TRUNCATING_STOP_REASONS`. */
+  let limitedBy: string | undefined
 
   /**
    * Fires exactly once. A finished turn arrives as *both* a `modelMessageStopEvent` with `endTurn`
@@ -140,7 +172,14 @@ export async function parseAgentCoreStream(
     // shape: every layer behaved — the runtime answered 200, the BFF relayed every chunk and said
     // `done: ok` — and the user is left with an empty bubble and nothing to report. A reply with no
     // content is not a reply, so it is named rather than rendered.
-    if (!produced && !failed) callbacks.onError(new EmptyReplyError())
+    //
+    // A ceiling firing is the same class of failure with the opposite symptom: there *is* content, and
+    // that is what makes it dangerous — the answer reads as finished. Reported even when text arrived,
+    // and ahead of the empty-reply case, because "stopped at a limit" is the more specific explanation.
+    if (!failed) {
+      if (limitedBy) callbacks.onError(new TurnLimitError(limitedBy))
+      else if (!produced) callbacks.onError(new EmptyReplyError())
+    }
 
     callbacks.onComplete()
   }
@@ -222,6 +261,8 @@ export async function parseAgentCoreStream(
 
           if (innerType === 'modelMessageStopEvent') {
             const stopReason = inner.stopReason as string | undefined
+            if (stopReason && TRUNCATING_STOP_REASONS.has(stopReason)) limitedBy = stopReason
+
             if (stopReason === 'endTurn' || stopReason === 'end_turn') {
               thinkingFilter.flush()
               complete()
@@ -254,6 +295,14 @@ export async function parseAgentCoreStream(
 
         // ── agentResultEvent → final result ──────────────────────────────
         if (eventType === 'agentResultEvent') {
+          // Where a per-invocation cap actually surfaces: the caps are checked at the top of each
+          // loop iteration, so the last model call ends with its own ordinary stop reason and the
+          // *result* is what carries `limitTurns`. Reading only `modelMessageStopEvent` misses it.
+          const stopReason = (chunk.result as { stopReason?: unknown } | undefined)?.stopReason
+          if (typeof stopReason === 'string' && TRUNCATING_STOP_REASONS.has(stopReason)) {
+            limitedBy = stopReason
+          }
+
           thinkingFilter.flush()
           complete()
           continue

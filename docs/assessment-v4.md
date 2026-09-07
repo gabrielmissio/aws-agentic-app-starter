@@ -1951,7 +1951,7 @@ architecture or security design. That is the profile of a foundation to build on
 (passing; one low dev-only advisory), and `cdk synth` under three profile configurations (demo:
 success; pilot unpinned: refused; pilot with sandbox defaults: refused with 10 named violations; pilot
 fully configured: success, 119 resources), plus static analysis of the four synthesized CloudFormation
-templates. No AWS resource was created or modified. No prior assessment was consulted. Sections 20-22
+templates. No AWS resource was created or modified. No prior assessment was consulted. Sections 20-23
 record the remediation applied afterwards.*
 
 ---
@@ -2232,3 +2232,76 @@ The workflow makes the checks *run*; it cannot make them *required*. Nothing in 
   `secrets` job is the portable floor, not a replacement.
 - `schedule` triggers only run on the default branch, and GitHub disables them on repositories with no
   activity for 60 days.
+
+---
+
+## 23. Addendum — two gaps closed before publication
+
+Both small, both chosen because the gain is out of proportion to the effort. The first is a regression
+this remediation introduced.
+
+### A capped turn is no longer silent — a regression from §21, fixed
+
+**What was wrong.** §21 added per-invocation ceilings and logged `turn.limited` when one fired. That
+closed the operator's side and left the user's side open: `chatbot-frontend/src/lib/stream-parser.ts`
+handled `endTurn` and `toolUse` and let every other stop reason fall through to
+`onStatus('Processing...')`. Because a capped turn *does* produce text, `produced` was true and
+`EmptyReplyError` never fired either.
+
+The result was the exact failure shape this repository treats as first-class, made worse: a turn cut
+off at `limitTurns` — typically mid-task, right after the model asked for a tool the loop then refused
+to run — arrived as a confident, complete-looking answer that simply stopped. The runtime answered 200,
+the BFF said `done: ok`, and the only record was a log line the person reading the answer cannot see.
+Adding a cost control that lies to the end user is worse than having no cost control.
+
+**What changed.** A `TurnLimitError`, alongside the existing `EmptyReplyError`, raised when the turn
+ends on a truncating stop reason, with a localized notice in both catalogs
+(`chat.errorTurnLimited`, en-US and pt-BR). It is appended to whatever text arrived rather than
+replacing it — the same decision the existing error path makes, and for the same reason.
+
+Two details that took reading the SDK to get right:
+
+- **A per-invocation cap surfaces on the *result*, not on the message stop.** The caps are checked at
+  the top of each loop iteration, so the final model call ends with an ordinary stop reason
+  (`toolUse`, usually) and `agentResultEvent.result.stopReason` is the only place `limitTurns` appears.
+  Watching `modelMessageStopEvent` alone would have missed every one of them.
+- **`maxTokens` is a fourth case and arrives the other way round** — the model's own per-response
+  ceiling, on the message stop. Both paths now set the same flag, so whichever carries it is reported
+  once.
+
+Precedence is: a reported failure wins (it is the more specific explanation), then a cap, then an empty
+reply. Four tests cover it, including a turn that finished normally reporting nothing — otherwise every
+ordinary answer would grow a warning.
+
+The truncating stop reasons are restated in the frontend rather than imported from
+`agent/src/limits.ts`, for the reason the repository already restates `ACTOR_ID_LENGTH`: the two
+packages cannot import each other. They are also the SDK's spellings rather than this template's.
+
+### `NODE_TLS_REJECT_UNAUTHORIZED=0` removed from both `.env.example` files — closes SEC-05
+
+It was commented out and carried a clear warning, which is not the point: these are files whose
+documented instruction is to copy them verbatim, so a process-wide TLS bypass sat one uncomment away
+from every fork — and it would disable verification for the calls to Bedrock, not only for the
+connection someone was fighting with.
+
+The knowledge is preserved where it cannot be pasted into a running configuration by accident: a note
+in `agent/README.md` and `chatbot-bff/README.md` saying to export it for the single command that needs
+it, and why a value in `.env` outlives the reason for it.
+
+### Verified
+
+| Check | Result |
+|---|---|
+| `npm run verify` | Pass, exit 0 — **432 tests** (frontend 88 ← 84) |
+| `npm run build` · `npm run audit` · `npm run synth` | All pass, exit 0 |
+| Semgrep | Exit 0 |
+| `grep NODE_TLS_REJECT_UNAUTHORIZED` over every `.env.example` | No matches |
+
+### Deliberately still open
+
+- **The `docs/` decision** (§20). Unchanged, and still the one item that is purely a publication call.
+- **REL-05, a stop button.** The server cancels the loop on disconnect, but a user's only way to
+  trigger that is closing the tab. Worth doing; not done here.
+- **P2-4, a cost signal in minutes** — `FORECASTED` budget notifications and an alarm on the token
+  metrics. This is now the most valuable remaining S-sized item: the ceilings exist and are visible to
+  the user, but nobody is told when they start being reached.
