@@ -665,7 +665,7 @@ The full chain is reconstructable, and I can name the mechanism for each hop:
 | Inside the agent | `withRemoteContext` extracts the parent so the agent's spans join the same trace; Strands emits GenAI-convention spans; `session.id` and `correlation.id` are stamped as trace attributes |
 | Agent → Bedrock/Memory | `instrumentation.ts` preloaded via `node --import`, so the AWS SDK is patched before any client resolves — the ordering is asserted by test, and the comment records it was *measured* (imported: zero spans; preloaded: one) |
 | Spans → CloudWatch | SigV4-signed OTLP to `xray.<region>.amazonaws.com/v1/traces`, directed by header into the deployment's own log group so retention, the CMK and the masking policy reach them |
-| Metrics | EMF to the same log group: tokens in/out, tool call and error counts, tool duration, model latency, time-to-first-token, DELTA temporality so a token graph does not only climb |
+| Metrics | EMF to the same log group: tokens in/out, cycle count and duration, invocation count, tool call and error counts, tool duration, model latency, and a guarded-turn counter, DELTA temporality so a token graph does not only climb. Time-to-first-token is **not** among them — Strands emits no such instrument, and it was listed here on the strength of the dashboard charting a name rather than of anything writing it. The number comes from `AWS/Bedrock`'s own `TimeToFirstToken` |
 | Stored turn | `recordTurn` files the correlation id as event metadata, so the id a user quotes locates the exact exchange without searching by timestamp |
 
 Two details show real operational experience: `suppressTracing` around the exporters' own AWS calls
@@ -1172,7 +1172,7 @@ Can a team answer the operational questions? Assessed one by one.
 | Which model was used? | **Yes** | `BEDROCK_MODEL_ID` on the runtime and in the Bedrock metric dimensions; on spans via GenAI conventions |
 | Abnormal token / tool-call growth? | **Detectable, not alarmed** | The metrics exist and are charted; no anomaly detection or threshold alarm on tokens or tool calls |
 | Silent errors? | **Handled explicitly** | This is the repository's strongest operational instinct — see below |
-| Useful business + technical metrics? | **Yes** | Technical: invocations, throttles, errors, latency, sessions. Business-adjacent: tokens, time-to-first-token, tool calls/errors/duration |
+| Useful business + technical metrics? | **Yes** | Technical: invocations, throttles, errors, latency, sessions. Business-adjacent: tokens, tool calls/errors/duration, guarded turns. Time-to-first-token comes from `AWS/Bedrock`, not from the agent — see the transport table |
 | Actionable alarms? | **Yes** | Seven, each with an `alarmDescription` written as a diagnosis rather than a restatement: "AgentCore is throttling invocations — the deployment is at a service quota, not broken"; "The chat Lambda is slow. Nothing is erroring — users are abandoning the turn instead" |
 | End-to-end correlation? | **Yes** | `traceparent` (by instrumentation, not hand-injected) plus `baggage` for the correlation id |
 | Can sensitive data appear in traces/logs? | **Bounded, honestly** | Two-layer redaction with each layer's blind spot named; `logs:Unmask` granted to nobody |
