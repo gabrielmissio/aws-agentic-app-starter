@@ -905,9 +905,12 @@ describe('AgentStack — agent telemetry', () => {
   it('masks personal and credential data in the telemetry log group', () => {
     const { template } = synthObservability()
 
-    const policy = JSON.stringify(
-      Object.values(template.findResources('AWS::Logs::LogGroup'))[0]?.Properties,
+    // Two groups now: the telemetry group and the findings group its audit statement reports into.
+    const telemetry = Object.values(template.findResources('AWS::Logs::LogGroup')).find((group) =>
+      String((group.Properties as { LogGroupName?: string }).LogGroupName).endsWith('/test'),
     )
+    const policy = JSON.stringify(telemetry?.Properties)
+
     for (const identifier of ['EmailAddress', 'Name', 'CreditCardNumber', 'AwsSecretKey']) {
       expect(policy).toContain(identifier)
     }
@@ -923,7 +926,8 @@ describe('AgentStack — agent telemetry', () => {
     const { template } = synthObservability()
 
     const groups = Object.values(template.findResources('AWS::Logs::LogGroup'))
-    expect(groups).toHaveLength(1)
+    // The telemetry group and the masking-findings group; neither may outlive the stack.
+    expect(groups).toHaveLength(2)
     expect((groups[0] as { DeletionPolicy?: string }).DeletionPolicy).toBe('Delete')
   })
 
@@ -1211,6 +1215,25 @@ describe('BffStack — one telemetry model', () => {
  * service leaves with no retention, no CMK and no masking. Without these calls the content policy
  * covers the spans describing a turn and misses the plainest record of it.
  */
+
+/** The masking document `governRuntimeLogGroup` hands to `PutDataProtectionPolicy`, parsed. */
+function maskingPolicyOf(template: Template): {
+  Statement: {
+    Sid: string
+    DataIdentifier: string[]
+    Operation: { Audit?: { FindingsDestination: unknown }; Deidentify?: unknown }
+  }[]
+} {
+  const resource = Object.values(template.findResources('Custom::AWS')).find((candidate) =>
+    String((candidate.Properties as { Update?: unknown }).Update).includes('PutDataProtectionPolicy'),
+  )
+  if (!resource) throw new Error('no PutDataProtectionPolicy call in the template')
+
+  const call = JSON.parse(String((resource.Properties as { Update: string }).Update))
+
+  return JSON.parse(call.parameters.policyDocument)
+}
+
 describe('AgentStack — the runtime\'s own log group', () => {
   function synthGoverned() {
     const app = new cdk.App()
@@ -1222,6 +1245,7 @@ describe('AgentStack — the runtime\'s own log group', () => {
       runtimeId: 'test_agent-AbCdEf1234',
       encryptionKey: key,
       retentionDays: 30,
+      findingsLogGroupName: '/aws/vendedlogs/bedrock-agentcore/test-findings',
     })
 
     return Template.fromStack(stack)
@@ -1266,6 +1290,39 @@ describe('AgentStack — the runtime\'s own log group', () => {
     for (const identifier of ['EmailAddress', 'Name', 'CreditCardNumber', 'AwsSecretKey', 'CpfCode-BR']) {
       expect(runtimePolicy).toContain(identifier)
     }
+  })
+
+  /**
+   * The audit/mask split, asserted on the document this group actually receives.
+   *
+   * Masking all ten on write turned ordinary prose into asterisks and masked the *name* of the span
+   * attribute the GenAI console reads. Auditing stays wide so nothing goes undetected; masking is
+   * narrowed to identifiers with a verifiable structure. Reverting this quietly re-breaks the logs.
+   */
+  it('audits more identifiers than it masks', () => {
+    const { Statement } = maskingPolicyOf(synthGoverned())
+    const names = (sid: string) =>
+      (Statement.find((statement) => statement.Sid === sid)?.DataIdentifier ?? []).map((arn) =>
+        arn.slice(arn.lastIndexOf('/') + 1),
+      )
+
+    for (const noisy of ['Name', 'Address', 'PhoneNumber-US', 'IpAddress']) {
+      expect(names('audit')).toContain(noisy)
+      expect(names('redact')).not.toContain(noisy)
+    }
+    for (const precise of ['EmailAddress', 'CreditCardNumber', 'CpfCode-BR', 'AwsSecretKey']) {
+      expect(names('redact')).toContain(precise)
+    }
+  })
+
+  /** An audit statement with no destination computes findings and drops them. */
+  it('sends findings somewhere they can be read', () => {
+    const { Statement } = maskingPolicyOf(synthGoverned())
+    const audit = Statement.find((statement) => statement.Sid === 'audit')
+
+    expect(audit?.Operation.Audit?.FindingsDestination).toEqual({
+      CloudWatchLogs: { LogGroup: '/aws/vendedlogs/bedrock-agentcore/test-findings' },
+    })
   })
 
   /**

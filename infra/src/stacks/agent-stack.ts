@@ -455,6 +455,7 @@ export class AgentStack extends cdk.Stack {
         runtimeId: runtime.attrAgentRuntimeId,
         encryptionKey,
         retentionDays: conversationRetentionDays,
+        findingsLogGroupName: observability.findingsLogGroup.logGroupName,
       })
     }
     this.runtimeStatus = runtime.attrStatus
@@ -632,15 +633,26 @@ export function bedrockModelResources(
 }
 
 /**
- * What CloudWatch Logs masks on write, in both of this agent's log groups.
+ * What CloudWatch Logs looks for, and the narrower set it actually masks.
  *
- * One list with two consumers: the telemetry log group takes it through the L2
- * `DataProtectionPolicy`, and the runtime's own log group — which AgentCore creates, not this stack
- * — takes it as a raw policy document through `governRuntimeLogGroup`. Splitting them would let the
- * two drift, and the point of the policy is that a reader cannot find in one group what was masked
- * in the other.
+ * **Why two lists.** The first deployment masked all ten on write, and the account showed what that
+ * costs: ordinary Portuguese prose came back as `"pode me ********** pergunta real"` and
+ * `"alguma ********** ferramentas"`, the bind address `0.0.0.0` was masked as an IP address, and —
+ * worst — the span attribute whose values are `LLM` and `AGENT` arrived as `aws.**********_kind` in
+ * six of nine spans, its *name* masked. (Which identifier fired is not knowable from here: reading
+ * it back needs `logs:Unmask`, which this template grants to no one, and the audit statement had no
+ * findings destination — the second of which is fixed below.) `Name` and
+ * `Address` are pattern-matched against free text, and agent logs are nothing but free text, so they
+ * fire constantly. Masking that hides no personal data while making a log unreadable and a console
+ * attribute unparseable is a net loss, not a conservative default.
+ *
+ * **What replaces it.** Everything is still *audited*, so nothing stops being detected and the
+ * findings say exactly what would have been masked. Only identifiers with a checkable structure —
+ * an email, a card, an SSN, a CPF, a key — are masked on write. A fork that finds real names leaking
+ * in its own traffic promotes `NAME` into the masked list from evidence in the findings log group,
+ * rather than inheriting a default that already proved noisy here.
  */
-const MASKED_IDENTIFIERS = [
+const AUDITED_IDENTIFIERS = [
   logs.DataIdentifier.EMAILADDRESS,
   logs.DataIdentifier.NAME,
   logs.DataIdentifier.ADDRESS,
@@ -653,19 +665,52 @@ const MASKED_IDENTIFIERS = [
   logs.DataIdentifier.IPADDRESS,
 ]
 
-/** The same policy the L2 construct renders, as the document `PutDataProtectionPolicy` expects. */
-function maskingPolicyDocument(projectName: string): string {
-  const identifiers = MASKED_IDENTIFIERS.map(
-    (identifier) => `arn:aws:dataprotection::aws:data-identifier/${identifier.name}`,
-  )
+/**
+ * The subset masked on write: each has a structure a matcher can verify, so a hit is a hit.
+ *
+ * `NAME`, `ADDRESS`, `PHONENUMBER_US` and `IPADDRESS` are deliberately absent — audited, not masked.
+ * They are the four that matched prose and a bind address above.
+ */
+const MASKED_IDENTIFIERS = [
+  logs.DataIdentifier.EMAILADDRESS,
+  logs.DataIdentifier.CREDITCARDNUMBER,
+  logs.DataIdentifier.SSN_US,
+  logs.DataIdentifier.CPFCODE_BR,
+  logs.DataIdentifier.AWSSECRETKEY,
+  logs.DataIdentifier.OPENSSHPRIVATEKEY,
+]
+
+/**
+ * The masking policy, as the document both log groups take.
+ *
+ * Written out rather than built with the L2 `DataProtectionPolicy`, which renders one identifier
+ * list into both the audit and the deidentify statement and so cannot express the split above. Both
+ * log groups take this same string — the telemetry group through an escape hatch, the runtime's own
+ * group through `PutDataProtectionPolicy` — because a reader must not find in one group what was
+ * masked in the other.
+ */
+function maskingPolicyDocument(projectName: string, findingsLogGroup: string): string {
+  const arns = (identifiers: logs.DataIdentifier[]) =>
+    identifiers.map((identifier) => `arn:aws:dataprotection::aws:data-identifier/${identifier.name}`)
 
   return JSON.stringify({
-    Name: `${projectName}-runtime-masking`,
-    Description: "Masks personal and credential data in the agent's own log group.",
+    Name: `${projectName}-agent-masking`,
+    Description: 'Audits personal data and masks the identifiers precise enough to mask.',
     Version: '2021-06-01',
     Statement: [
-      { Sid: 'audit', DataIdentifier: identifiers, Operation: { Audit: { FindingsDestination: {} } } },
-      { Sid: 'redact', DataIdentifier: identifiers, Operation: { Deidentify: { MaskConfig: {} } } },
+      {
+        Sid: 'audit',
+        DataIdentifier: arns(AUDITED_IDENTIFIERS),
+        // A destination is what makes the audit statement worth having. Without it the findings are
+        // computed and dropped, so nobody can see what the masked list is missing — which is exactly
+        // the evidence a fork needs to widen it.
+        Operation: { Audit: { FindingsDestination: { CloudWatchLogs: { LogGroup: findingsLogGroup } } } },
+      },
+      {
+        Sid: 'redact',
+        DataIdentifier: arns(MASKED_IDENTIFIERS),
+        Operation: { Deidentify: { MaskConfig: {} } },
+      },
     ],
   })
 }
@@ -690,7 +735,7 @@ export function createObservability(
     encryptionKey: kms.IKey
     retentionDays: number
   },
-): { logGroup: logs.LogGroup; metricNamespace: string } {
+): { logGroup: logs.LogGroup; findingsLogGroup: logs.LogGroup; metricNamespace: string } {
   const { projectName, encryptionKey, retentionDays } = options
   const stack = cdk.Stack.of(scope)
 
@@ -709,11 +754,17 @@ export function createObservability(
    * identity block the BFF prepends. That payload is captured at HTTP ingress, before the container
    * runs, so no code of ours could have masked it at the source.
    */
-  const dataProtectionPolicy = new logs.DataProtectionPolicy({
-    name: `${projectName}-agent-masking`,
-    description: 'Masks personal and credential data in agent telemetry.',
-    identifiers: [...MASKED_IDENTIFIERS],
+  // Where the audit statement files what it detected. Separate from the groups it audits — a policy
+  // cannot report into a group it governs — and short-lived, because these are findings to act on,
+  // not a second copy of the data to keep.
+  const findingsLogGroup = new logs.LogGroup(scope, 'AgentMaskingFindings', {
+    logGroupName: `/aws/vendedlogs/bedrock-agentcore/${projectName}-findings`,
+    retention: logs.RetentionDays.ONE_WEEK,
+    encryptionKey,
+    removalPolicy: cdk.RemovalPolicy.DESTROY,
   })
+
+  const policyDocument = maskingPolicyDocument(projectName, findingsLogGroup.logGroupName)
 
   const logGroup = new logs.LogGroup(scope, 'AgentTelemetryLogs', {
     logGroupName: `/aws/vendedlogs/bedrock-agentcore/${projectName}`,
@@ -722,7 +773,6 @@ export function createObservability(
     // one here would quietly reopen the deletion promise the memory resource makes.
     retention: nearestRetention(retentionDays),
     encryptionKey,
-    dataProtectionPolicy,
     // `DESTROY`, like every other log group in this template, and deliberately not `RETAIN`.
     //
     // `RETAIN` also applies to the rollback of the update that *created* the group: a deploy that
@@ -736,6 +786,11 @@ export function createObservability(
     // the retention above and already masked by the policy below it.
     removalPolicy: cdk.RemovalPolicy.DESTROY,
   })
+
+  // Set on the L1, not through the L2 `dataProtectionPolicy` prop: that construct renders one
+  // identifier list into both statements, and the whole point here is that the audited set is wider
+  // than the masked one. `governRuntimeLogGroup` applies this same string to the runtime's group.
+  ;(logGroup.node.defaultChild as logs.CfnLogGroup).dataProtectionPolicy = JSON.parse(policyDocument)
 
   // X-Ray writes the spans into the log group on the agent's behalf, so the *service* needs the
   // grant. Without it the endpoint answers 400 and the spans never appear.
@@ -766,7 +821,7 @@ export function createObservability(
     }),
   })
 
-  return { logGroup, metricNamespace: `${projectName}/Agent` }
+  return { logGroup, findingsLogGroup, metricNamespace: `${projectName}/Agent` }
 }
 
 /**
@@ -803,9 +858,10 @@ export function governRuntimeLogGroup(
     runtimeId: string
     encryptionKey: kms.IKey
     retentionDays: number
+    findingsLogGroupName: string
   },
 ): void {
-  const { projectName, runtimeId, encryptionKey, retentionDays } = options
+  const { projectName, runtimeId, encryptionKey, retentionDays, findingsLogGroupName } = options
   const stack = cdk.Stack.of(scope)
 
   // `DEFAULT` is the endpoint name, and the only endpoint this stack creates.
@@ -871,7 +927,7 @@ export function governRuntimeLogGroup(
 
   const masking = call('RuntimeLogGroupMasking', 'PutDataProtectionPolicy', {
     logGroupIdentifier: logGroupName,
-    policyDocument: maskingPolicyDocument(projectName),
+    policyDocument: maskingPolicyDocument(projectName, findingsLogGroupName),
   })
   masking.node.addDependency(encryption)
 }

@@ -272,6 +272,44 @@ aws xray update-trace-segment-destination --destination CloudWatchLogs --region 
 Then wait for `ACTIVE` before re-running `cdk deploy`. Nothing needs to be rolled back or cleaned up
 first: the failed stack update leaves no partial delivery behind.
 
+### The traces exist in the logs but the trace map is empty
+
+`aws xray get-trace-summaries` and `get-service-graph` return nothing, and Transaction Search shows
+far fewer traces than the agent actually served — while a Logs Insights query over the span log
+groups finds them all.
+
+This is sampling, not loss. Transaction Search stores **100%** of spans as structured logs and
+**indexes** only a percentage of them for search and the trace map. The default is 1%:
+
+```bash
+aws xray get-indexing-rules --region <your region>
+```
+
+```json
+{ "IndexingRules": [ { "Name": "Default", "Rule": { "Probabilistic": { "DesiredSamplingPercentage": 1.0 } } } ] }
+```
+
+Raise it when you are developing or piloting, where you want to open the map for a turn you just
+made rather than for a random one in a hundred:
+
+```bash
+aws xray update-indexing-rule --name "Default" \
+  --rule '{"Probabilistic": {"DesiredSamplingPercentage": 100}}' --region <your region>
+```
+
+This is account-and-Region-wide state, like Transaction Search itself, so this stack does not set it
+— the same reasoning as `TRANSACTION_SEARCH_ENABLED`. Indexing is what Transaction Search bills on,
+so 100% is a development setting; lower it before a workload with real volume.
+
+Two related things worth knowing when the map still looks thin:
+
+- **The legacy X-Ray APIs go quiet by design.** Once the trace segment destination is CloudWatch
+  Logs, `BatchGetTraces`, `GetTraceSummaries` and `GetServiceGraph` stop being fed. Use Transaction
+  Search in the CloudWatch console, or query the span log groups directly.
+- **`lastEventTimestamp` lies.** `describe-log-streams` updates it on an eventual-consistency basis
+  and it can trail by more than an hour, so a stream that looks stalled may be receiving fine. Use
+  `filter-log-events` with a `--start-time` to tell whether spans are actually arriving.
+
 ### The deploy fails on a delivery source that "already exists"
 
 `cdk deploy` rolls back on the agent stack with:
