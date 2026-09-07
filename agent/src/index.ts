@@ -3,11 +3,11 @@
 // runs — so an import here would register after the SDK clients below are already resolved, and
 // produce no spans at all. It is preloaded instead, via `node --import` in the `start` script.
 import express, { type NextFunction, type Request, type Response } from 'express'
-import { createAgent, isGuarded, systemPromptVersion } from './agent'
+import { createAgent, GUARDED_STOP_REASONS, isGuarded, systemPromptVersion } from './agent'
 import { agentLimits, LIMIT_STOP_REASONS, MAX_BODY_BYTES, MAX_BODY_LENGTH } from './limits'
 import { parsePrompt, withCaller } from './caller'
 import { isDurable, loadHistory, recordTurn } from './memory'
-import { parseBaggage, startTelemetry, withRemoteContext } from './telemetry'
+import { countGuardedTurn, parseBaggage, startTelemetry, withRemoteContext } from './telemetry'
 
 // Before anything else: the Agent's spans and metrics are emitted unconditionally but reach a no-op
 // provider until this registers a real one, so a late call silently loses the first requests.
@@ -140,6 +140,28 @@ app.post(
                   sessionId,
                   reason: stopReason,
                   limits: agentLimits,
+                }),
+              )
+            }
+
+            // A content control ending the turn is the third way a turn goes wrong while answering
+            // 200, and it was the one nothing recorded. The guardrail is the only layer here that
+            // reads what is said; when it intervenes, the reply the user gets is not the one the
+            // model wrote, and without this line the sole evidence of that is the answer itself.
+            //
+            // Logged at the same level as the two above, on purpose: `turn.failed`, `turn.limited`
+            // and `turn.guarded` are one class — the turn did not end the way the model intended —
+            // and one query on `level` should find all three. The counter beside it is what makes
+            // "how often did the guardrail fire this week" answerable without reading any of them.
+            if (typeof stopReason === 'string' && GUARDED_STOP_REASONS.has(stopReason)) {
+              countGuardedTurn()
+              console.error(
+                JSON.stringify({
+                  level: 'error',
+                  event: 'turn.guarded',
+                  correlationId,
+                  sessionId,
+                  reason: stopReason,
                 }),
               )
             }
