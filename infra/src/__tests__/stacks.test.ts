@@ -1098,34 +1098,34 @@ describe('BffStack — one telemetry model', () => {
   it('instruments with OpenTelemetry and nothing else', () => {
     const rendered = JSON.stringify(synth(true).toJSON())
 
-    expect(rendered).toContain('aws-otel-nodejs')
+    expect(rendered).toContain('AWSOpenTelemetryDistroJs')
     expect(rendered).not.toContain('aws-xray-sdk')
+    // The legacy layer family bundles an ADOT Collector, which AWS does not recommend for a
+    // CloudWatch destination and which would contradict the agent's own collectorless exporter.
+    expect(rendered).not.toContain('aws-otel-nodejs')
   })
 
   /**
-   * `/opt/otel-instrument` is the *Python* wrapper. Setting it here leaves the function running and
-   * uninstrumented, and the trace map looks exactly as it did before — a failure with no error.
+   * The wrapper is what distinguishes the two ADOT layer families, and the wrong one leaves the
+   * function running and uninstrumented — a trace map identical to the broken one, with no error.
    */
-  it('uses the Node wrapper, not the Python one', () => {
+  it('uses the wrapper the current layer family expects', () => {
     const template = synth(true)
 
     for (const fn of Object.values(template.findResources('AWS::Lambda::Function'))) {
       const environment = (fn.Properties as { Environment?: { Variables?: Record<string, string> } })
         .Environment?.Variables
-      expect(environment?.AWS_LAMBDA_EXEC_WRAPPER).toBe('/opt/otel-handler')
+      expect(environment?.AWS_LAMBDA_EXEC_WRAPPER).toBe('/opt/otel-instrument')
       // Without a service name the map cannot tell two of the three functions apart.
       expect(environment?.OTEL_SERVICE_NAME).toMatch(/^test-bff/)
     }
   })
 
-  /** A layer whose architecture differs from the function's fails at deploy naming neither. */
-  it('matches the layer architecture to the functions', () => {
+  it('runs the functions on Graviton', () => {
     const template = synth(true)
 
     for (const fn of Object.values(template.findResources('AWS::Lambda::Function'))) {
-      const properties = fn.Properties as { Architectures?: string[]; Layers?: unknown[] }
-      expect(properties.Architectures).toEqual(['arm64'])
-      expect(JSON.stringify(properties.Layers)).toContain('aws-otel-nodejs-arm64')
+      expect((fn.Properties as { Architectures?: string[] }).Architectures).toEqual(['arm64'])
     }
   })
 

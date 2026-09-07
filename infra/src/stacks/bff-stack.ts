@@ -50,19 +50,31 @@ export interface BffStackProps extends cdk.StackProps {
 }
 
 /**
- * The AWS account that publishes the ADOT Lambda layers. Fixed by AWS, identical in every Region.
+ * The AWS account publishing the AWS Lambda Layer for OpenTelemetry. Identical in every Region.
+ *
+ * Note there are two ADOT layer families and this is the current one. The older `aws-otel-nodejs-*`
+ * layers (account 901920570463) bundle an ADOT Collector inside the function, and AWS's own guidance
+ * is that "unless you want to export the telemetry data to a non CloudWatch endpoint, [that]
+ * approach is not recommended" — we export to CloudWatch. It would also contradict the agent, where
+ * `otlp-sigv4.ts` exists precisely because the ADOT Collector is not supported for agent
+ * observability. The tell between the two is the wrapper: `/opt/otel-handler` is the legacy layer,
+ * `/opt/otel-instrument` is this one.
  */
-const ADOT_LAYER_ACCOUNT = '901920570463'
+const ADOT_LAYER_ACCOUNT = '615299751070'
 
 /**
- * The ADOT Node.js layer version, as `<semver-with-dashes>:<layer-version>`.
+ * The layer version, pinned.
  *
- * Pinned deliberately: a template that floats to "latest" changes what a fork deploys without the
- * fork changing anything. It will go stale — check
- * https://aws-otel.github.io/docs/getting-started/lambda/lambda-js for the current value and bump it
- * here, which is the only place it appears.
+ * A template that floats to "latest" changes what a fork deploys without the fork changing
+ * anything. This will go stale — the current value for a Region is
+ *
+ *   aws lambda list-layer-versions --region <region> \
+ *     --layer-name arn:aws:lambda:<region>:615299751070:layer:AWSOpenTelemetryDistroJs \
+ *     --query 'LayerVersions[0].Version'
+ *
+ * and this constant is the only place it appears.
  */
-const ADOT_LAYER_VERSION = '1-30-2:6'
+const ADOT_LAYER_VERSION = '15'
 
 export class BffStack extends cdk.Stack {
   /** The /chat endpoint URL — consumed by FrontendStack for env-var injection */
@@ -109,10 +121,6 @@ export class BffStack extends cdk.Stack {
      */
     const architecture = lambda.Architecture.ARM_64
 
-    // The layer has to match the function's architecture, and a mismatch fails at deploy with an
-    // error that names neither. Derived from the constant above rather than written twice.
-    const adotArchitecture = architecture === lambda.Architecture.ARM_64 ? 'arm64' : 'amd64'
-
     /**
      * OpenTelemetry auto-instrumentation for the three functions, from the AWS-managed ADOT layer.
      *
@@ -135,19 +143,19 @@ export class BffStack extends cdk.Stack {
       ? lambda.LayerVersion.fromLayerVersionArn(
           this,
           'AdotLayer',
-          `arn:${this.partition}:lambda:${this.region}:${ADOT_LAYER_ACCOUNT}:layer:aws-otel-nodejs-${adotArchitecture}-ver-${ADOT_LAYER_VERSION}`,
+          // This layer family is architecture-neutral — one ARN serves x86_64 and arm64.
+          `arn:${this.partition}:lambda:${this.region}:${ADOT_LAYER_ACCOUNT}:layer:AWSOpenTelemetryDistroJs:${ADOT_LAYER_VERSION}`,
         )
       : undefined
 
     /** Applied to every function, so a new one cannot be born untraced by omission. */
     const otelEnvironment: Record<string, string> = adotLayer
       ? {
-          // Node's wrapper. `/opt/otel-instrument` is the *Python* one and fails silently here —
-          // the function runs, uninstrumented, and the trace map looks exactly as it did before.
-          AWS_LAMBDA_EXEC_WRAPPER: '/opt/otel-handler',
-          // Pinned rather than left to the layer's default, so an upstream change to that default
-          // cannot quietly alter what this template traces.
-          OTEL_NODE_ENABLED_INSTRUMENTATIONS: 'aws-sdk,aws-lambda,http',
+          AWS_LAMBDA_EXEC_WRAPPER: '/opt/otel-instrument',
+          // Tracing without Application Signals. The layer supports both, but Application Signals
+          // is separately billed and its value here is the SLO layer this template deliberately
+          // defers (docs/assessment.md) — so it stays off until someone chooses a target.
+          OTEL_AWS_APPLICATION_SIGNALS_ENABLED: 'false',
         }
       : {}
 
