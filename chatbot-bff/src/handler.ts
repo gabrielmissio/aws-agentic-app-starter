@@ -3,7 +3,7 @@ import type { APIGatewayProxyEvent } from 'aws-lambda'
 import type { Writable } from 'node:stream'
 import { invokeAgentStream } from './agent-client.js'
 import { conversationIndexUpdate, deriveTitle, resolveRetentionDays } from './conversations.js'
-import { CORRELATION_HEADER, logEvent, resolveCorrelationId, traceParentFrom } from './correlation.js'
+import { CORRELATION_HEADER, logEvent, resolveCorrelationId } from './correlation.js'
 import { formatSseEvent, jsonHeaders, sseHeaders, validateMessage } from './http.js'
 import { checkRateLimit, resolveRateLimitConfig } from './rate-limit.js'
 import { resolveSessionId } from './session.js'
@@ -24,15 +24,6 @@ const dynamoClient = new DynamoDBClient({ region: process.env.AWS_REGION || 'us-
 
 function writeSseEvent(responseStream: Writable, event: string, data: unknown) {
   responseStream.write(formatSseEvent(event, data))
-}
-
-/**
- * The X-Ray root for this invocation, when active tracing is on. Read per request, not once at cold
- * start: Lambda rewrites this variable on every invocation, so a cached value would staple every
- * turn on a warm container to the trace of the first one.
- */
-function currentTraceId(): string | undefined {
-  return process.env._X_AMZN_TRACE_ID?.split(';')[0]?.replace('Root=', '') || undefined
 }
 
 /**
@@ -198,13 +189,6 @@ export const handler = awslambda.streamifyResponse(
         sessionId,
         agentRuntimeArn: AGENT_RUNTIME_ARN,
         correlationId,
-        ...(currentTraceId() ? { traceId: currentTraceId() as string } : {}),
-        // The same segment, in the format the agent's OTel propagator understands. Sending both is
-        // deliberate: `traceId` is what X-Ray and the AgentCore service span use, `traceParent` is
-        // what joins the container's spans to that same tree instead of starting a second one.
-        ...(traceParentFrom(process.env._X_AMZN_TRACE_ID)
-          ? { traceParent: traceParentFrom(process.env._X_AMZN_TRACE_ID) as string }
-          : {}),
       })
 
       const decoder = new TextDecoder()
