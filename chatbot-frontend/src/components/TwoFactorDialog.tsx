@@ -174,12 +174,27 @@ export function TwoFactorDialog({ email, onClose }: { email?: string; onClose: (
             </>
           ) : (
             status?.kind === 'enrolled' && (
+              // Everything the panel has to say, then everything it can do. `canDisable` decides
+              // which form the second factor's terms take: a sentence under `required`, where they
+              // are not negotiable, and a button under `optional`, where they are.
               <>
                 <p className="text-sm text-muted-foreground">{t('mfa.enrolled')}</p>
+
+                {!status.canDisable && (
+                  // Not a missing feature: the pool mandates a factor, so Cognito would refuse.
+                  <p className="text-xs text-muted-foreground">{t('mfa.requiredHint')}</p>
+                )}
+
+                {/*
+                  What the button below actually does, said before it is pressed rather than after:
+                  `setUpTOTP` associates a new secret and verifying it invalidates the old entry, so
+                  someone expecting to add a spare would be locking themselves out of the original.
+                */}
+                <p className="text-xs text-muted-foreground">{t('mfa.replaceHint')}</p>
+
                 {/*
                   A lost or changed phone otherwise needs an administrator, and under `required`
-                  there is no signing in without the code. Labelled as a replacement because that is
-                  what it is: verifying a new secret invalidates the entry already in the app.
+                  there is no signing in without the code.
                 */}
                 <Button
                   type="button"
@@ -189,13 +204,11 @@ export function TwoFactorDialog({ email, onClose }: { email?: string; onClose: (
                 >
                   {t('mfa.replace')}
                 </Button>
-                {status.canDisable ? (
+
+                {status.canDisable && (
                   <Button type="button" variant="danger" onClick={() => void disable()} disabled={busy}>
                     {t('mfa.disable')}
                   </Button>
-                ) : (
-                  // Not a missing feature: the pool mandates a factor, so Cognito would refuse.
-                  <p className="text-xs text-muted-foreground">{t('mfa.requiredHint')}</p>
                 )}
               </>
             )

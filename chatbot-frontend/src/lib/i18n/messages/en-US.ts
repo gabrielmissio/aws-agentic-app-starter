@@ -65,6 +65,8 @@ export const enUS = {
     'This deployment requires a second factor. Set up an authenticator app to finish.',
   'mfa.enroll': 'Set up an authenticator app',
   'mfa.replace': 'Replace authenticator app',
+  'mfa.replaceHint':
+    'Setting up a new app replaces the current one — codes from the old entry stop working.',
   'mfa.replacePrompt':
     'Scan this with the authenticator app you want to use from now on. As soon as you enter a code from it, the old entry stops working.',
   'mfa.disable': 'Turn off two-factor authentication',
