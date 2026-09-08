@@ -1,5 +1,12 @@
 import { useState } from 'react'
-import { confirmSignIn, confirmSignUp, signIn, signUp, type SignInOutput } from 'aws-amplify/auth'
+import {
+  confirmSignIn,
+  confirmSignUp,
+  signIn,
+  signUp,
+  updateMFAPreference,
+  type SignInOutput,
+} from 'aws-amplify/auth'
 import { isPublicSignUpEnabled } from '@/lib/auth.ts'
 import { routeSignIn, type ChallengeView, type TotpSetup } from '@/lib/auth-steps.ts'
 import { BRAND } from '@/lib/brand.ts'
@@ -118,8 +125,20 @@ export function AuthScreen({ onAuthenticated }: { onAuthenticated: () => void })
   const handleTotp = async () => {
     setError('')
     setLoading(true)
+    // Read before the call, because answering the challenge is what moves the view on.
+    const wasEnrollment = view === 'totpSetup'
     try {
-      applyResult(await confirmSignIn({ challengeResponse: totpCode.trim() }))
+      const result = await confirmSignIn({ challengeResponse: totpCode.trim() })
+
+      // The enrollment challenge verifies a token; it never writes an MFA preference, and the
+      // preference is the only half of the pair a browser can read back. Without this the account
+      // is challenged at every sign-in while the security panel reports nothing enrolled.
+      //
+      // Best-effort by design: the factor is active either way, so a failure here must not cost
+      // the user the sign-in they just completed. `resolveMfaStatus` repairs what this misses.
+      if (wasEnrollment) await updateMFAPreference({ totp: 'PREFERRED' }).catch(() => undefined)
+
+      applyResult(result)
     } catch (err) {
       // The code is wrong or expired far more often than anything else here, and either way the
       // next attempt needs an empty field — a six-digit code is only valid for one window.

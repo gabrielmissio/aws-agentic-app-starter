@@ -8,14 +8,15 @@ import {
 } from 'aws-amplify/auth'
 import { BRAND } from '@/lib/brand.ts'
 import { useI18n } from '@/lib/i18n/context.ts'
-import { mfaMode, mfaStatus, type MfaStatus } from '@/lib/mfa.ts'
+import { mfaMode, resolveMfaStatus, type MfaStatus } from '@/lib/mfa.ts'
 import { TotpSecret } from './TotpSecret.tsx'
 import { Alert, Button, CARD_CLASS, Field, TextInput } from './ui/index.ts'
 
 /**
  * Voluntary second-factor enrollment — the only path under `optional`, where Cognito challenges
- * users who already have a factor but never asks anyone to create one. Under `required` this only
- * confirms what sign-in already did; under `off` it is not rendered at all.
+ * users who already have a factor but never asks anyone to create one. Under `required` sign-in has
+ * already enrolled the user, so what is left is confirming it and replacing a lost authenticator;
+ * under `off` it is not rendered at all.
  *
  * Portalled into `document.body`, which is not a detail: `AppHeader` sets `backdrop-blur`, and
  * `backdrop-filter` makes an element a containing block for `position: fixed` descendants — so
@@ -26,14 +27,26 @@ export function TwoFactorDialog({ email, onClose }: { email?: string; onClose: (
   const mode = mfaMode()
 
   const [status, setStatus] = useState<MfaStatus | null>(null)
-  const [setup, setSetup] = useState<{ sharedSecret: string; setupUri: string } | null>(null)
+  const [setup, setSetup] = useState<{
+    sharedSecret: string
+    setupUri: string
+    /** A replacement invalidates the entry the user already has, so it is worded differently. */
+    replacing: boolean
+  } | null>(null)
   const [code, setCode] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [done, setDone] = useState('')
 
   const refresh = async () => {
-    setStatus(mfaStatus(mode, await fetchMFAPreference()))
+    // `resolveMfaStatus` rather than the preference alone: under `required` an empty preference
+    // does not mean unenrolled, and it is the one that knows how to find out.
+    setStatus(
+      await resolveMfaStatus(mode, {
+        readPreference: fetchMFAPreference,
+        preferTotp: () => updateMFAPreference({ totp: 'PREFERRED' }),
+      }),
+    )
   }
 
   useEffect(() => {
@@ -42,8 +55,9 @@ export function TwoFactorDialog({ email, onClose }: { email?: string; onClose: (
     refresh().catch(() => setError(t('mfa.loadFailed')))
   }, [])
 
-  const beginEnrollment = async () => {
+  const beginEnrollment = async (replacing: boolean) => {
     setError('')
+    setDone('')
     setBusy(true)
     try {
       const details = await setUpTOTP()
@@ -51,6 +65,7 @@ export function TwoFactorDialog({ email, onClose }: { email?: string; onClose: (
         sharedSecret: details.sharedSecret,
         // Both, so someone enrolled in two environments can tell the entries apart.
         setupUri: details.getSetupUri(BRAND.name, email).toString(),
+        replacing,
       })
       setCode('')
     } catch (err) {
@@ -68,8 +83,9 @@ export function TwoFactorDialog({ email, onClose }: { email?: string; onClose: (
       // Verifying associates the device; it does not switch the factor on. Without this the user
       // finishes the flow, is told they are protected, and is never challenged.
       await updateMFAPreference({ totp: 'PREFERRED' })
+      const replaced = setup?.replacing ?? false
       setSetup(null)
-      setDone(t('mfa.enrolledNow'))
+      setDone(t(replaced ? 'mfa.replacedNow' : 'mfa.enrolledNow'))
       await refresh()
     } catch (err) {
       // A six-digit code is valid for one window, so a retry always needs an empty field.
@@ -134,7 +150,9 @@ export function TwoFactorDialog({ email, onClose }: { email?: string; onClose: (
 
           {setup ? (
             <>
-              <p className="text-sm text-muted-foreground">{t('auth.totpSetupPrompt')}</p>
+              <p className="text-sm text-muted-foreground">
+                {t(setup.replacing ? 'mfa.replacePrompt' : 'auth.totpSetupPrompt')}
+              </p>
               <TotpSecret sharedSecret={setup.sharedSecret} setupUri={setup.setupUri} />
               <Field label={t('auth.totpCodeLabel')} htmlFor="mfa-code">
                 <TextInput
@@ -158,6 +176,19 @@ export function TwoFactorDialog({ email, onClose }: { email?: string; onClose: (
             status?.kind === 'enrolled' && (
               <>
                 <p className="text-sm text-muted-foreground">{t('mfa.enrolled')}</p>
+                {/*
+                  A lost or changed phone otherwise needs an administrator, and under `required`
+                  there is no signing in without the code. Labelled as a replacement because that is
+                  what it is: verifying a new secret invalidates the entry already in the app.
+                */}
+                <Button
+                  type="button"
+                  variant="secondary"
+                  onClick={() => void beginEnrollment(true)}
+                  disabled={busy}
+                >
+                  {t('mfa.replace')}
+                </Button>
                 {status.canDisable ? (
                   <Button type="button" variant="danger" onClick={() => void disable()} disabled={busy}>
                     {t('mfa.disable')}
@@ -175,7 +206,7 @@ export function TwoFactorDialog({ email, onClose }: { email?: string; onClose: (
               <p className="text-sm text-muted-foreground">
                 {status.enforced ? t('mfa.enforcedPrompt') : t('mfa.optionalPrompt')}
               </p>
-              <Button type="button" onClick={() => void beginEnrollment()} disabled={busy}>
+              <Button type="button" onClick={() => void beginEnrollment(false)} disabled={busy}>
                 {busy ? t('common.loading') : t('mfa.enroll')}
               </Button>
             </>
