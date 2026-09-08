@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { mfaStatus, type MfaMode } from '../lib/mfa'
+import { mfaStatus, resolveMfaStatus, type MfaMode, type MfaPreference } from '../lib/mfa'
 
 /**
  * The three MFA modes, as three different products.
@@ -87,5 +87,98 @@ describe('what the security panel is told', () => {
       kind: 'enrolled',
     })
     expect(mfaStatus('optional', { enabled: ['SMS'] })).toMatchObject({ kind: 'notEnrolled' })
+  })
+})
+
+describe('resolving the status against an account Cognito will not fully describe', () => {
+  /**
+   * A Cognito account as the two calls see it. `verifiedToken` is the half `GetUser` never
+   * reports: the write is refused without one, and with one it succeeds and writes the preference
+   * the read has been missing — which is exactly how the probe tells the two apart.
+   */
+  function account(state: { verifiedToken: boolean; preference: MfaPreference }) {
+    const calls = { reads: 0, writes: 0 }
+    return {
+      calls,
+      readPreference: async () => {
+        calls.reads += 1
+        return state.preference
+      },
+      preferTotp: async () => {
+        calls.writes += 1
+        if (!state.verifiedToken) throw new Error('User has not verified software token')
+        state.preference = { enabled: ['TOTP'], preferred: 'TOTP' }
+      },
+    }
+  }
+
+  it('reports the enrolled user Cognito challenges but does not describe', async () => {
+    // The bug: `required` challenges on the verified token, and the sign-in setup challenge writes
+    // no preference — so a protected account reads back as enrolled in nothing and was shown the
+    // enrollment prompt at every visit.
+    const cognito = account({ verifiedToken: true, preference: {} })
+
+    expect(await resolveMfaStatus('required', cognito)).toEqual({
+      kind: 'enrolled',
+      canDisable: false,
+    })
+    // And the record is repaired on the way past, so the next read needs no probe at all.
+    expect(cognito.calls.writes).toBe(1)
+  })
+
+  it('still offers enrollment to a user who genuinely has no factor', async () => {
+    // Cognito refuses the write without a verified token, which is the answer the probe wants: the
+    // one person who needs the enrollment control must not have it hidden.
+    const cognito = account({ verifiedToken: false, preference: {} })
+
+    expect(await resolveMfaStatus('required', cognito)).toEqual({
+      kind: 'notEnrolled',
+      enforced: true,
+    })
+  })
+
+  it('never probes under optional, where an empty preference is a decision', async () => {
+    // There Cognito challenges on the preference, so empty means opted out. Probing would switch
+    // the factor back on for someone who deliberately turned it off.
+    const cognito = account({ verifiedToken: true, preference: { enabled: [] } })
+
+    expect(await resolveMfaStatus('optional', cognito)).toEqual({
+      kind: 'notEnrolled',
+      enforced: false,
+    })
+    expect(cognito.calls.writes).toBe(0)
+  })
+
+  it('does not probe an account that already reads as enrolled', async () => {
+    const cognito = account({ verifiedToken: true, preference: { enabled: ['TOTP'] } })
+
+    expect(await resolveMfaStatus('required', cognito)).toEqual({
+      kind: 'enrolled',
+      canDisable: false,
+    })
+    expect(cognito.calls.writes).toBe(0)
+  })
+
+  it('does not probe at all when the pool runs without MFA', async () => {
+    // The APIs behind the probe are refused by a pool with no MFA configured, and there is no
+    // panel to populate either way.
+    const cognito = account({ verifiedToken: false, preference: {} })
+
+    expect(await resolveMfaStatus('off', cognito)).toEqual({ kind: 'unavailable' })
+    expect(cognito.calls.writes).toBe(0)
+  })
+
+  it('believes the re-read rather than the write it just made', async () => {
+    // A write that reports success but leaves the preference empty leaves the enrollment control
+    // on screen. Wrong in the direction that can still be recovered from by hand.
+    const stubborn = {
+      readPreference: async (): Promise<MfaPreference> => ({}),
+      preferTotp: async () => undefined,
+    }
+
+    expect(await resolveMfaStatus('required', stubborn)).toEqual({
+      kind: 'notEnrolled',
+      enforced: true,
+    })
   })
 })

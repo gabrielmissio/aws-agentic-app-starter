@@ -61,8 +61,14 @@ export const ptBR = {
   'mfa.enforcedPrompt':
     'Este ambiente exige um segundo fator. Configure um app autenticador para concluir.',
   'mfa.enroll': 'Configurar app autenticador',
+  'mfa.replace': 'Trocar app autenticador',
+  'mfa.replaceHint':
+    'Configurar um novo app substitui o atual — os códigos da entrada antiga param de funcionar.',
+  'mfa.replacePrompt':
+    'Escaneie com o app autenticador que você quer usar a partir de agora. Assim que você digitar um código dele, a entrada antiga deixa de funcionar.',
   'mfa.disable': 'Desativar autenticação em duas etapas',
   'mfa.enrolledNow': 'Autenticação em duas etapas ativada.',
+  'mfa.replacedNow': 'Este app autenticador agora protege a conta. O anterior não funciona mais.',
   'mfa.disabledNow': 'Autenticação em duas etapas desativada.',
   'mfa.loadFailed': 'Não foi possível ler suas configurações de segurança.',
   'mfa.setupFailed': 'Não foi possível iniciar a configuração.',
