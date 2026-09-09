@@ -1,0 +1,139 @@
+name: Deploy
+
+# Deploy-on-merge, OPT-IN. This workflow is additive: a clone that has not run the OIDC bootstrap
+# (see infra/bootstrap/README.md) is unaffected. The `guard` job below detects that case and the
+# whole workflow ends GREEN with a notice — it never fails a fork that has not opted in, and it never
+# touches the credential-free `ci.yml` gate.
+#
+# Enable it by deploying infra/bootstrap once and setting AWS_DEPLOY_ROLE_ARN (+ the DEPLOY_* vars)
+# on a GitHub Environment named `prod`.
+
+on:
+  push:
+    branches: [main]
+  # Manual trigger from the Actions tab, for a deploy outside a merge.
+  workflow_dispatch:
+
+# OIDC needs id-token: write to mint the token AWS exchanges for temporary credentials. Everything
+# else stays read-only.
+permissions:
+  id-token: write
+  contents: read
+
+# Never cancel a deploy in flight — unlike CI, a half-applied CloudFormation change is worse than a
+# queued one. Serialize instead.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Cheap gate with no credentials: is CD configured at all? If AWS_DEPLOY_ROLE_ARN is empty, the
+  # deploy job is skipped and this job prints how to enable it. A fork sees green, not red.
+  guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      configured: ${{ steps.check.outputs.configured }}
+    environment: prod
+    steps:
+      - id: check
+        env:
+          ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+        run: |
+          if [ -n "$ROLE_ARN" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            echo "CD is configured; the deploy job will run." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "## CD not configured — nothing to deploy"
+              echo ""
+              echo "This repository has not opted in to deploy-on-merge, so this run did nothing (and that is fine)."
+              echo ""
+              echo "To enable it, deploy the one-time OIDC bootstrap and set the \`prod\` Environment variables —"
+              echo "see \`infra/bootstrap/README.md\`."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  deploy:
+    needs: guard
+    if: needs.guard.outputs.configured == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: prod
+    steps:
+      # Pinned by SHA to the same releases ci.yml uses.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: '**/package-lock.json'
+
+      - name: Install (root + every subpackage)
+        run: npm run bootstrap
+
+      # The agent stack builds an ARM64 container image asset. On an x86 runner that build needs QEMU
+      # emulation registered via binfmt — the same thing `npm run docker:setup-arm64` does locally.
+      - name: Enable ARM64 emulation for the agent image build
+        uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
+        with:
+          platforms: arm64
+
+      # OIDC: exchange the workflow's GitHub identity token for temporary AWS credentials by assuming
+      # the bootstrap deploy role. No long-lived key is stored anywhere.
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@b47578312673ae6fa5b5096b330d9fbac3d116df # v4.2.1
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.DEPLOY_REGION }}
+          role-session-name: gha-deploy-${{ github.run_id }}
+
+      # infra's deploy script runs `dotenvx run -f .env --overload -- cdk deploy`, so it needs a .env
+      # file. We materialize a minimal one from the Environment variables. --overload means these win;
+      # app.ts reads the rest straight from process.env, which the job already carries.
+      - name: Materialize infra/.env from Environment variables
+        working-directory: infra
+        env:
+          DEPLOY_PROFILE: ${{ vars.DEPLOY_PROFILE }}
+          DEPLOY_ACCOUNT: ${{ vars.DEPLOY_ACCOUNT }}
+          DEPLOY_REGION: ${{ vars.DEPLOY_REGION }}
+          PROJECT_NAME: ${{ vars.PROJECT_NAME }}
+          # Posture controls required under DEPLOY_PROFILE=prod. Set them on the prod Environment.
+          TRACING_ENABLED: ${{ vars.TRACING_ENABLED }}
+          GUARDRAIL_ENABLED: ${{ vars.GUARDRAIL_ENABLED }}
+          AGENT_OBSERVABILITY_ENABLED: ${{ vars.AGENT_OBSERVABILITY_ENABLED }}
+          TRANSACTION_SEARCH_ENABLED: ${{ vars.TRANSACTION_SEARCH_ENABLED }}
+          CONVERSATION_RETENTION_DAYS: ${{ vars.CONVERSATION_RETENTION_DAYS }}
+          ALERT_EMAIL: ${{ vars.ALERT_EMAIL }}
+          ALLOWED_ORIGIN: ${{ vars.ALLOWED_ORIGIN }}
+          APP_URL: ${{ vars.APP_URL }}
+          BEDROCK_MODEL_ID: ${{ vars.BEDROCK_MODEL_ID }}
+          MONTHLY_BUDGET_USD: ${{ vars.MONTHLY_BUDGET_USD }}
+          WAF_ENABLED: ${{ vars.WAF_ENABLED }}
+        run: |
+          # Emit only the variables that were actually set, one KEY=value per line.
+          : > .env
+          for key in DEPLOY_PROFILE DEPLOY_ACCOUNT DEPLOY_REGION PROJECT_NAME \
+                     TRACING_ENABLED GUARDRAIL_ENABLED AGENT_OBSERVABILITY_ENABLED \
+                     TRANSACTION_SEARCH_ENABLED CONVERSATION_RETENTION_DAYS ALERT_EMAIL \
+                     ALLOWED_ORIGIN APP_URL BEDROCK_MODEL_ID MONTHLY_BUDGET_USD WAF_ENABLED; do
+            value="${!key}"
+            if [ -n "$value" ]; then
+              printf '%s=%s\n' "$key" "$value" >> .env
+            fi
+          done
+          echo "Wrote infra/.env with $(grep -c '=' .env) variable(s)."
+
+      # cdk deploy --all, keeping the broadening-approval guard (never deploy:no-approval). CDK_DEFAULT_*
+      # come from the assumed-role credentials + region above; DEPLOY_ACCOUNT/REGION in .env make the
+      # config gate assert the target matches.
+      - name: Deploy all stacks
+        working-directory: infra
+        env:
+          CDK_DEFAULT_ACCOUNT: ${{ vars.DEPLOY_ACCOUNT }}
+          CDK_DEFAULT_REGION: ${{ vars.DEPLOY_REGION }}
+        run: npm run deploy
