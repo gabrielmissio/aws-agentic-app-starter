@@ -115,6 +115,12 @@ jobs:
           DEPLOY_REGION: ${{ vars.DEPLOY_REGION }}
           PROJECT_NAME: ${{ vars.PROJECT_NAME }}
           # Posture controls required under DEPLOY_PROFILE=prod. Set them on the prod Environment.
+          # This list MUST cover every variable assertDeploymentPosture() in infra/src/config.ts can
+          # refuse, or a prod deploy fails the gate despite the Environment being fully configured.
+          PUBLIC_SIGNUP_ENABLED: ${{ vars.PUBLIC_SIGNUP_ENABLED }}
+          COGNITO_MFA: ${{ vars.COGNITO_MFA }}
+          COGNITO_THREAT_PROTECTION: ${{ vars.COGNITO_THREAT_PROTECTION }}
+          RETAIN_DATA: ${{ vars.RETAIN_DATA }}
           TRACING_ENABLED: ${{ vars.TRACING_ENABLED }}
           GUARDRAIL_ENABLED: ${{ vars.GUARDRAIL_ENABLED }}
           AGENT_OBSERVABILITY_ENABLED: ${{ vars.AGENT_OBSERVABILITY_ENABLED }}
@@ -132,6 +138,7 @@ jobs:
           # with an embedded newline is rejected so it cannot inject a spurious second line.
           : > .env
           for key in DEPLOY_PROFILE DEPLOY_ACCOUNT DEPLOY_REGION PROJECT_NAME \
+                     PUBLIC_SIGNUP_ENABLED COGNITO_MFA COGNITO_THREAT_PROTECTION RETAIN_DATA \
                      TRACING_ENABLED GUARDRAIL_ENABLED AGENT_OBSERVABILITY_ENABLED \
                      TRANSACTION_SEARCH_ENABLED CONVERSATION_RETENTION_DAYS ALERT_EMAIL \
                      ALLOWED_ORIGIN APP_URL BEDROCK_MODEL_ID MONTHLY_BUDGET_USD WAF_ENABLED; do
