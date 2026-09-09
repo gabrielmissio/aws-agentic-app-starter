@@ -113,6 +113,37 @@ describe('GithubOidcStack', () => {
     synth({ reuseExistingProvider: true }).resourceCountIs('Custom::AWSCDKOpenIdConnectProvider', 0)
   })
 
+  it('keeps a working web-identity trust when importing an existing provider (no silent break)', () => {
+    // Importing must not drop the trust: the role still federates on
+    // sts:AssumeRoleWithWebIdentity against the deterministic provider ARN, with the same
+    // sub/aud conditions as the create path.
+    const t = synth({ reuseExistingProvider: true })
+    t.hasResourceProperties('AWS::IAM::Role', {
+      AssumeRolePolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: 'sts:AssumeRoleWithWebIdentity',
+            Principal: {
+              Federated: Match.objectLike({
+                'Fn::Join': Match.arrayWith([
+                  Match.arrayWith([
+                    Match.stringLikeRegexp('oidc-provider/token.actions.githubusercontent.com'),
+                  ]),
+                ]),
+              }),
+            },
+            Condition: {
+              StringEquals: Match.objectLike({
+                'token.actions.githubusercontent.com:aud': 'sts.amazonaws.com',
+                'token.actions.githubusercontent.com:sub': `repo:${REPO}:ref:refs/heads/main`,
+              }),
+            },
+          }),
+        ]),
+      },
+    })
+  })
+
   it('rejects a githubRepo that is not owner/repo', () => {
     expect(() => synth({ githubRepo: 'not-a-repo' })).toThrow(/owner\/repo/)
   })

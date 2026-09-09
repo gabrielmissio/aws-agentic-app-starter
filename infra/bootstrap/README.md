@@ -27,6 +27,22 @@ credential-free CI. Run it only when you want deploy-on-merge.
 
 ## Deploy it (once, by hand)
 
+**First, check whether this account already has the GitHub OIDC provider.** An account can hold only
+one provider per issuer URL, so if another project (or team) already registered it, you must import
+it rather than create a second one:
+
+```bash
+aws iam list-open-id-connect-providers \
+  --query "OpenIDConnectProviderList[?contains(Arn, 'token.actions.githubusercontent.com')]" \
+  --output text
+```
+
+- **Empty output** → no provider yet; deploy normally (the stack creates it).
+- **An ARN is printed** → the provider exists; add `-c reuseExistingProvider=true` to the deploy
+  below so the stack imports it instead of failing.
+
+Then deploy:
+
 ```
 cd infra
 npx cdk --app "npx tsx bootstrap/bootstrap-app.ts" deploy \
