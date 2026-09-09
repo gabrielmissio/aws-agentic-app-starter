@@ -43,6 +43,17 @@ export interface GithubOidcStackProps extends cdk.StackProps {
    * project already registered `token.actions.githubusercontent.com`.
    */
   readonly reuseExistingProvider?: boolean
+  /**
+   * Numeric GitHub owner (org/user) ID. Since 2026-07-15 GitHub issues OIDC tokens with an
+   * *immutable* subject claim embedding numeric IDs — `repo:OWNER@<ownerId>/REPO@<repoId>:ref:…` —
+   * for newly created or renamed repositories. When both `githubOwnerId` and `githubRepoId` are
+   * given, the trust policy matches BOTH the classic slug form and this immutable form, so it keeps
+   * working across a rename and cannot be satisfied by an attacker who reclaims a deleted slug.
+   * Find the IDs with `gh api repos/<owner>/<repo> --jq '.owner.id, .id'`. Optional but recommended.
+   */
+  readonly githubOwnerId?: string
+  /** Numeric GitHub repository ID. See `githubOwnerId`. */
+  readonly githubRepoId?: string
 }
 
 const GITHUB_OIDC_URL = 'https://token.actions.githubusercontent.com'
@@ -85,13 +96,35 @@ export class GithubOidcStack extends cdk.Stack {
         })
 
     // The principal that may assume the role: a GitHub Actions run whose OIDC token proves it is this
-    // repository at the allowed ref. `sub` is the exact identity claim; `aud` must be the STS
-    // audience the configure-aws-credentials action requests.
+    // repository at the allowed ref. `aud` is always the STS audience configure-aws-credentials
+    // requests, asserted under StringEquals. `sub` is the identity claim, pinned to this repo + ref
+    // (never a wildcard — a slug-only wildcard is reusable after a rename/delete and is a real attack
+    // surface).
+    //
+    // Since 2026-07-15 GitHub issues an IMMUTABLE subject claim for new/renamed repos that embeds
+    // numeric ids: `repo:OWNER@<ownerId>/REPO@<repoId>:ref:<ref>`. A classic-slug-only condition
+    // silently fails to match those, denying every deploy. When the numeric ids are supplied we match
+    // BOTH forms with StringLike; without them we fall back to an exact StringEquals on the classic
+    // form (correct today, but add the ids before this repo is ever renamed).
+    const classicSub = `repo:${props.githubRepo}:ref:${allowedRef}`
+    const hasImmutableIds = Boolean(props.githubOwnerId && props.githubRepoId)
+
+    const subConditions: Record<string, Record<string, string | string[]>> = hasImmutableIds
+      ? (() => {
+          const [owner, repo] = props.githubRepo.split('/')
+          const immutableSub = `repo:${owner}@${props.githubOwnerId}/${repo}@${props.githubRepoId}:ref:${allowedRef}`
+          return {
+            StringLike: { [`${GITHUB_OIDC_DOMAIN}:sub`]: [classicSub, immutableSub] },
+          }
+        })()
+      : { StringEquals: { [`${GITHUB_OIDC_DOMAIN}:sub`]: classicSub } }
+
     const principal = new iam.OpenIdConnectPrincipal(provider, {
       StringEquals: {
         [`${GITHUB_OIDC_DOMAIN}:aud`]: AWS_STS_AUDIENCE,
-        [`${GITHUB_OIDC_DOMAIN}:sub`]: `repo:${props.githubRepo}:ref:${allowedRef}`,
+        ...(subConditions.StringEquals ?? {}),
       },
+      ...(subConditions.StringLike ? { StringLike: subConditions.StringLike } : {}),
     })
 
     // The role holds NO service permissions of its own. It can only assume the roles that
@@ -114,9 +147,20 @@ export class GithubOidcStack extends cdk.Stack {
         actions: ['sts:AssumeRole'],
         resources: [bootstrapRolePattern],
         // The bootstrap roles are tagged with their purpose; this narrows the grant to CDK's own
-        // roles even if another role happened to match the name pattern.
+        // roles even if another role happened to match the name pattern. The key MUST be the IAM
+        // service-specific `iam:ResourceTag/*` — for tag-based authorization on an IAM role resource
+        // the global `aws:ResourceTag/*` is not evaluated, so it would never match and would silently
+        // deny every deploy after an apply that looks clean. Verified against AWS's own
+        // "assume roles that have a specific tag" reference policy.
         conditions: {
-          StringEquals: { 'aws:ResourceTag/aws-cdk:bootstrap-role': ['deploy', 'file-publishing', 'image-publishing', 'lookup'] },
+          StringEquals: {
+            'iam:ResourceTag/aws-cdk:bootstrap-role': [
+              'deploy',
+              'file-publishing',
+              'image-publishing',
+              'lookup',
+            ],
+          },
         },
       }),
     )

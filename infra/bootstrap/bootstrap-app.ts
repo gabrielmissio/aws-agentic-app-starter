@@ -25,6 +25,8 @@ import { GithubOidcStack } from './github-oidc-stack.js'
  *   allowedRef             (optional) default refs/heads/main
  *   cdkQualifier           (optional) default hnb659fds
  *   reuseExistingProvider  (optional) "true" if this account already has the GitHub OIDC provider
+ *   githubOwnerId          (optional) numeric org/user id — pins the immutable subject claim
+ *   githubRepoId           (optional) numeric repo id — pins the immutable subject claim
  */
 
 const app = new cdk.App()
@@ -46,6 +48,8 @@ const allowedRef = ctx('allowedRef') ?? process.env.GITHUB_ALLOWED_REF
 const cdkQualifier = ctx('cdkQualifier') ?? process.env.CDK_QUALIFIER
 const reuseExistingProvider =
   (ctx('reuseExistingProvider') ?? process.env.REUSE_EXISTING_OIDC_PROVIDER) === 'true'
+const githubOwnerId = ctx('githubOwnerId') ?? process.env.GITHUB_OWNER_ID
+const githubRepoId = ctx('githubRepoId') ?? process.env.GITHUB_REPO_ID
 
 const projectName = ctx('projectName') ?? process.env.PROJECT_NAME ?? 'agentic-app-template'
 
@@ -54,6 +58,8 @@ new GithubOidcStack(app, `${projectName}-github-oidc`, {
   allowedRef,
   cdkQualifier,
   reuseExistingProvider,
+  githubOwnerId,
+  githubRepoId,
   env: {
     // Falls back to whatever the calling credentials resolve to, like the main app.
     account: process.env.CDK_DEFAULT_ACCOUNT,

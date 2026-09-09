@@ -130,10 +130,14 @@ entregue e revisável; o usuário (ou o admin da conta) executa.
   2. `actions/checkout` (pinado por SHA, como o `ci.yml`).
   3. `actions/setup-node@22` + cache npm.
   4. `npm run bootstrap` (instala root + subpacotes).
-  5. **QEMU/binfmt para ARM64** — o agent-stack constrói uma `DockerImageAsset` ARM64
-     (`resolveAgentImagePlatform` / `docker:setup-arm64` faz `binfmt --install arm64`).
-  6. `aws-actions/configure-aws-credentials` (OIDC, `role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}`).
-  7. Materializa `.env` a partir das vars do Environment (ver ponto técnico abaixo).
+  5. **Runner ARM64 nativo** (`runs-on: ubuntu-24.04-arm`) — o agent-stack constrói uma
+     `DockerImageAsset` ARM64 (Graviton), que o CDK constrói para a arquitetura do runner no deploy.
+     Build nativo dispensa QEMU/binfmt (emulação 5-10x mais lenta, feita para multi-arch). Nota para
+     forks **privados**: runner ARM64 hospedado é grátis em repo público, **cobrado** em privado —
+     alternativa documentada no workflow (voltar a `ubuntu-latest` + `docker/setup-qemu-action`).
+  6. `aws-actions/configure-aws-credentials@v6.2.4` (OIDC, `role-to-assume`, `role-duration-seconds`
+     explícito casando com o `maxSessionDuration` da role).
+  7. Materializa `.env` a partir das vars do Environment (rejeita valores com newline).
   8. `npm run deploy` (`cdk deploy --all --require-approval broadening`).
 
 ### Ponto técnico a resolver na implementação
