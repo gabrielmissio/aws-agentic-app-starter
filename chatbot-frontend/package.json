@@ -19,7 +19,7 @@
   "dependencies": {
     "@aws-amplify/auth": "^6.20.0",
     "aws-amplify": "^6.20.0",
-    "lucide-react": "^1.38.0",
+    "lucide-react": "^1.41.0",
     "qrcode-generator": "2.0.4",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
@@ -30,7 +30,7 @@
     "@tailwindcss/vite": "^4.3.3",
     "@types/node": "^26.4.1",
     "@types/react": "^19.2.18",
-    "@types/react-dom": "^19.2.5",
+    "@types/react-dom": "^19.2.7",
     "@vitejs/plugin-react": "^5.0.4",
     "tailwindcss": "^4.2.1",
     "typescript": "^7.0.2",
