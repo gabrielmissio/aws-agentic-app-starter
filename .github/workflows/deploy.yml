@@ -144,7 +144,7 @@ jobs:
                      ALLOWED_ORIGIN APP_URL BEDROCK_MODEL_ID MONTHLY_BUDGET_USD WAF_ENABLED; do
             value="${!key}"
             if [ -n "$value" ]; then
-              if printf '%s' "$value" | grep -q $'\n'; then
+              if [[ "$value" == *$'\n'* ]]; then
                 echo "::error::$key contains a newline; refusing to write .env." >&2
                 exit 1
               fi
