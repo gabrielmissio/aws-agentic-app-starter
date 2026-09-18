@@ -158,4 +158,4 @@ jobs:
       # DEPLOY_ACCOUNT/REGION in .env make the config gate assert the target matches.
       - name: Deploy all stacks
         working-directory: infra
-        run: npm run deploy
+        run: npm run deploy:no-approval
