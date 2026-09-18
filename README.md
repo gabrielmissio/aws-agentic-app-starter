@@ -56,6 +56,22 @@ the one failure here that a green `cdk deploy` does not predict. The fix, and wh
 change, is in
 [infra/README.md](infra/README.md#model-access-is-denied-on-the-first-message).
 
+### Deploy on merge (optional)
+
+By default there is no CD: `npm run deploy` runs from your machine, on your credentials. That stays
+true unless you opt in.
+
+If you want a merge to `main` to deploy automatically, this repo ships an **opt-in** GitHub Actions
+workflow ([.github/workflows/deploy.yml](.github/workflows/deploy.yml)) that authenticates to AWS
+with **OIDC** — no long-lived key stored in GitHub. Turning it on is a one-time step, documented in
+[infra/bootstrap/README.md](infra/bootstrap/README.md): deploy a small separate CDK app that creates
+the OIDC trust and a scoped deploy role, then set `AWS_DEPLOY_ROLE_ARN` (and the `DEPLOY_*`
+variables) on a GitHub Environment named `prod`.
+
+Until you do that, the workflow is inert: it ends **green with a notice** rather than failing, the
+credential-free `ci.yml` gate is untouched, and manual `npm run deploy` keeps working exactly as
+above. The trust stack is a separate CDK entrypoint, so `cdk deploy --all` never touches it.
+
 ## Architecture
 
 <picture>
