@@ -20,6 +20,7 @@
     "synth": "dotenvx run -f .env --overload -- cdk synth",
     "prenag": "npm run build:dependencies",
     "nag": "dotenvx run -f .env --overload -- tsx src/nag.ts",
+    "preflight": "dotenvx run -f .env --overload -- tsx src/preflight-cli.ts",
     "predeploy": "npm run build:dependencies",
     "deploy": "dotenvx run -f .env --overload -- cdk deploy --all --require-approval broadening",
     "predeploy:no-approval": "npm run build:dependencies",

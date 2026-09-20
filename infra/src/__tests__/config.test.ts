@@ -22,6 +22,7 @@ import {
   resolveConversationRetentionDays,
   resolveGuardrailEnabled,
   resolveTracingEnabled,
+  parseBedrockModelId,
 } from '../config.js'
 
 describe('resolveAgentImagePlatform', () => {
@@ -408,5 +409,30 @@ describe('pinning a deployment to its account and region', () => {
     expect(() => resolveExpectedAccount('12345')).toThrow('DEPLOY_ACCOUNT')
     expect(resolveExpectedAccount('  ')).toBeUndefined()
     expect(resolveExpectedAccount('123456789012')).toBe('123456789012')
+  })
+})
+
+describe('parseBedrockModelId', () => {
+  it('strips the geography prefix that makes an id an inference profile', () => {
+    for (const prefix of ['us', 'eu', 'apac', 'global']) {
+      expect(parseBedrockModelId(`${prefix}.anthropic.claude-sonnet-5`)).toEqual({
+        foundationModelId: 'anthropic.claude-sonnet-5',
+        isInferenceProfile: true,
+      })
+    }
+  })
+
+  it('leaves a bare foundation model id alone', () => {
+    expect(parseBedrockModelId('anthropic.claude-haiku-4-5-20251001-v1:0')).toEqual({
+      foundationModelId: 'anthropic.claude-haiku-4-5-20251001-v1:0',
+      isInferenceProfile: false,
+    })
+  })
+
+  it('does not take a provider for a geography', () => {
+    // `meta` and `amazon` are providers, and a one-segment id has nothing to strip.
+    expect(parseBedrockModelId('amazon.nova-pro-v1:0').isInferenceProfile).toBe(false)
+    expect(parseBedrockModelId('meta.llama3-1-70b-instruct-v1:0').isInferenceProfile).toBe(false)
+    expect(parseBedrockModelId('us').isInferenceProfile).toBe(false)
   })
 })

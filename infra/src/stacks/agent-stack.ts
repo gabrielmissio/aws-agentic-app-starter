@@ -8,6 +8,7 @@ import * as logs from 'aws-cdk-lib/aws-logs'
 import * as cr from 'aws-cdk-lib/custom-resources'
 import { Construct } from 'constructs'
 import { fileURLToPath } from 'node:url'
+import { parseBedrockModelId } from '../config.js'
 
 /**
  * The runtime's name, and the first half of the `Name` dimension on every `AWS/Bedrock-AgentCore`
@@ -638,10 +639,7 @@ export function bedrockModelResources(
   scope: { partition: string; account: string },
   modelId: string,
 ): string[] {
-  const [prefix, ...rest] = modelId.split('.')
-  const isInferenceProfile =
-    rest.length > 0 && ['global', 'us', 'eu', 'apac'].includes(prefix as string)
-  const foundationModelId = isInferenceProfile ? rest.join('.') : modelId
+  const { foundationModelId, isInferenceProfile } = parseBedrockModelId(modelId)
 
   return [
     // Foundation-model ARNs carry no account: the model is AWS's, not the caller's.
