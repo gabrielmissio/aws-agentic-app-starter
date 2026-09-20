@@ -89,6 +89,11 @@ PR — do not edit the test to make the suite pass.
   system prompt*. A tool the prompt never mentions is one the model has little reason to call — add
   it to "What you can do" in `agent/src/agent.ts` and the test goes green. It asserts that the prompt
   names every tool that exists, so adding tools never requires editing the test itself.
+- **A green deploy whose first chat message answers *"Model access is denied"*** is a missing Bedrock
+  agreement in the account, not an IAM gap. Do not grant `aws-marketplace:Subscribe` to the runtime
+  role. **`X-Ray Delivery Destination is supported with CloudWatch Logs`** is Transaction Search not
+  enabled in the account. `npm run preflight` predicts both, read-only, and prints the fix for each;
+  [infra/README.md](infra/README.md#a-new-account-checklist) has the reasoning.
 - **`exec format error` building the agent image** on a non-arm64 machine → `npm run docker:setup-arm64`.
 
 ## Where new things go

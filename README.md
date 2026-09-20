@@ -34,6 +34,7 @@ Docker with Buildx, AWS credentials, and access to AgentCore Runtime and to the 
 npm run bootstrap                       # installs the root package and all four subpackages
 cp infra/.env.example infra/.env        # set PROJECT_NAME — it prefixes every resource
 npm --prefix infra run cdk -- bootstrap # CDK's own bootstrap: once per account+region
+npm run preflight                       # read-only: what this account still needs before a deploy
 npm run deploy
 ```
 
@@ -45,6 +46,11 @@ The defaults in `.env.example` deploy a working sandbox — `us-east-1`, `DEPLOY
 sign-up on — so `PROJECT_NAME` is the only value a first deploy has to set. `deploy` builds the app
 artifacts and deploys the four stacks, pausing for confirmation on any change that widens IAM.
 
+`preflight` looks at the account-level setup a deploy depends on but cannot create for itself — the CDK
+toolkit stack, Bedrock model access, and (with agent observability on) CloudWatch Transaction Search —
+and prints the command that fixes each one it finds missing. It changes nothing; see
+[infra/README.md](infra/README.md#a-new-account-checklist). On a brand-new account, run it first.
+
 When it finishes, the `frontend` stack outputs `DistributionUrl`. Open it, create an account, and the
 agent answers. To make that account an admin, see
 [infra/README.md](infra/README.md#managing-users-and-admins); for what every variable does, see
@@ -52,8 +58,8 @@ agent answers. To make that account an admin, see
 
 If that first message comes back refusing on **model access** rather than answering, the account has
 no Marketplace agreement for the model yet — a one-time step this deploy cannot take for itself, and
-the one failure here that a green `cdk deploy` does not predict. The fix, and why it is not an IAM
-change, is in
+the one failure here that a green `cdk deploy` does not predict (`npm run preflight` does). The fix,
+and why it is not an IAM change, is in
 [infra/README.md](infra/README.md#model-access-is-denied-on-the-first-message).
 
 ### Deploy on merge (optional)
@@ -175,6 +181,7 @@ validation and a fixed caller id: it exercises the streaming path, not the autho
 | `npm run audit` | `npm audit --audit-level=high` in every package |
 | `npm run build` | Build every deployable artifact — agent bundle, BFF bundles, frontend `dist` |
 | `npm run synth` | Build artifacts and synthesize the CDK app |
+| `npm run preflight` | Read-only check of the account-level setup a first deploy needs — CDK toolkit, Bedrock model access, Transaction Search. Prints the fix for each miss |
 | `npm run deploy` | Deploy all infrastructure |
 | `npm run deploy:no-approval` | The same with no confirmation prompt — sandbox or pipeline only |
 | `npm run destroy` | Destroy all stacks |
@@ -317,10 +324,11 @@ It is scaffolding, not a finished product. What is deliberately yours:
 * **Transaction Search is a prerequisite this template will not turn on for you.** It is
   account-and-Region-wide state other workloads depend on, so a `cdk destroy` here must not be able
   to switch off their telemetry. `TRANSACTION_SEARCH_ENABLED` is an acknowledgement that you enabled
-  it (`aws xray update-trace-segment-destination --destination CloudWatchLogs`), gated under
+  it (a CloudWatch Logs resource policy, then `aws xray update-trace-segment-destination --destination
+  CloudWatchLogs` — [in that order](infra/README.md#the-deploy-fails-on-an-x-ray-delivery-destination)), gated under
   `pilot`/`prod` because without it spans are accepted and then silently discarded — the deployment
-  looks healthy and the traces simply never appear. Verify with `aws xray
-  get-trace-segment-destination` before deploying — it must read **both** `CloudWatchLogs` **and**
+  looks healthy and the traces simply never appear. Verify with `npm run preflight`, or `aws xray
+  get-trace-segment-destination`, before deploying — it must read **both** `CloudWatchLogs` **and**
   `ACTIVE`. If the deploy fails on a delivery destination, see
   [infra/README.md](infra/README.md#troubleshooting).
 * **There is no CD pipeline.** Deploys run from a developer's machine with ambient credentials, and

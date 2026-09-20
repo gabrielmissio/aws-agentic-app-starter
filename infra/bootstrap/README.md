@@ -24,12 +24,23 @@ credential-free CI. Run it only when you want deploy-on-merge.
    ```
    npx cdk bootstrap aws://<account-id>/<region>
    ```
+3. The account-level setup the first deploy needs — done **now, from your machine**, not left for the
+   pipeline. The deploy role holds nothing but `sts:AssumeRole` into CDK's roles, so it cannot enable
+   Transaction Search or a Bedrock model agreement, and the failure would surface in the Actions log
+   after the agent image has been built. The workflow deploys under `DEPLOY_PROFILE=prod`, which
+   requires both. From the repository root, with an admin profile:
+   ```
+   npm run preflight -- --github-oidc
+   ```
+   It only reads, and prints the command that fixes each thing it finds missing — see
+   [A new account checklist](../README.md#a-new-account-checklist). It also reports the OIDC provider
+   question below, so you can skip the manual check.
 
 ## Deploy it (once, by hand)
 
-**First, check whether this account already has the GitHub OIDC provider.** An account can hold only
-one provider per issuer URL, so if another project (or team) already registered it, you must import
-it rather than create a second one:
+**First, check whether this account already has the GitHub OIDC provider** (`preflight` above reports
+it too). An account can hold only one provider per issuer URL, so if another project (or team) already
+registered it, you must import it rather than create a second one:
 
 ```bash
 aws iam list-open-id-connect-providers \
@@ -127,7 +138,7 @@ these, or the deploy fails by design:
 | `GUARDRAIL_ENABLED` | `true` | Nothing else filters model input/output. |
 | `TRACING_ENABLED` | `true` | So a wrong answer is reconstructable across browser/BFF/agent. |
 | `AGENT_OBSERVABILITY_ENABLED` | `true` | The agent is where the turn is decided. |
-| `TRANSACTION_SEARCH_ENABLED` | `true` | Assertion, not a switch — enable it once per account/Region first (`infra/README.md`), then acknowledge it here. |
+| `TRANSACTION_SEARCH_ENABLED` | `true` | Assertion, not a switch — enable it once per account/Region first ([the checklist](../README.md#a-new-account-checklist)), then acknowledge it here. |
 | `CONVERSATION_RETENTION_DAYS` | a number, e.g. `30` | How long recorded conversations are kept is your call. |
 
 ### Or set everything from the CLI (`gh`)
