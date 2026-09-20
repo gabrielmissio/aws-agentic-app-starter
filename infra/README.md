@@ -13,6 +13,7 @@ cp .env.example .env
 | Script | Purpose |
 |---|---|
 | `npm run synth` | Build required artifacts and synthesize the CDK app |
+| `npm run preflight` | Read-only check of the account-level setup a first deploy needs — see [A new account checklist](#a-new-account-checklist) |
 | `npm run deploy` | Build required artifacts and deploy all stacks |
 | `npm run deploy:no-approval` | The same with no confirmation prompt — sandbox or pipeline only |
 | `npm run deploy:agent` / `deploy:bff` | Deploy a single stack |
@@ -22,6 +23,30 @@ cp .env.example .env
 
 Every script runs through `dotenvx run -f .env --overload`. The `--overload` matters: without it a
 stale `export PROJECT_NAME=…` in your shell silently wins over `.env` and deploys the wrong stacks.
+
+### A new account checklist
+
+Three things a deploy depends on live outside the stacks, and on an account that has never run this
+template each one fails late and points somewhere else. **`npm run preflight` checks all of them,
+changes nothing, and prints the command that fixes each one it finds missing.** Run it before the
+first `npm run deploy`, with the same `AWS_PROFILE` you will deploy with.
+
+| Prerequisite | Needed when | How it fails without it | The fix |
+|---|---|---|---|
+| The CDK toolkit stack (`cdk bootstrap`) | Always | The first asset upload | [Quick start](../README.md#quick-start) |
+| CloudWatch Transaction Search | `AGENT_OBSERVABILITY_ENABLED=true` — so under `pilot`/`prod`, and for deploy-on-merge | The agent stack rolls back on its `TRACES` delivery, minutes in and after the image is built | [Troubleshooting](#the-deploy-fails-on-an-x-ray-delivery-destination) |
+| A Bedrock model agreement, and for Anthropic the first-time-use form | Always | **Nothing at deploy time.** The deploy is green and the first chat message answers "Model access is denied" | [Troubleshooting](#model-access-is-denied-on-the-first-message) |
+
+It reads `.env` like every other script here, so it checks the model and the flags you deploy with,
+and it exits `1` when something would stop the deploy. It only reads: two of the fixes change
+account-wide state that other workloads share, which is why the stacks do not make them either (see
+`TRANSACTION_SEARCH_ENABLED` in [.env.example](.env.example)). A check it cannot run — a denied read,
+say — is reported as `warn`, and that is not the same as fine.
+
+`npm run preflight -- --github-oidc` adds what [deploy-on-merge](bootstrap/README.md) needs: it
+checks Transaction Search even when your local `.env` is a sandbox, because the workflow deploys
+under `prod`, and it tells you whether the account already has the GitHub OIDC provider. It needs
+credentials and the AWS CLI (2.27.42 or newer), so it is not part of `npm run verify` or CI.
 
 ## Stacks
 
@@ -309,14 +334,73 @@ aws xray get-trace-segment-destination --region <your region>
 | `"Destination": "CloudWatchLogs"`, `"Status": "PENDING"` | Enabled, still propagating. Wait and retry the deploy — nothing to fix |
 | `"Destination": "CloudWatchLogs"`, `"Status": "ACTIVE"` | Ready. If the deploy still fails, check the Region matches `DEPLOY_REGION` |
 
-To set it — once per account and Region, with an identity that has X-Ray admin rights:
+To set it — once per account and Region, with an identity that can administer X-Ray and CloudWatch
+Logs — do these **in this order**. The console's **Enable Transaction Search** button does all of them
+for you. The API does not, and the first step is the one that gets skipped:
+
+**1. Let X-Ray write to the span log groups**, with a CloudWatch Logs resource policy for the
+`xray.amazonaws.com` service principal. `npm run preflight` prints this with your account and Region
+filled in.
+
+```bash
+REGION=<your region>
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+aws logs put-resource-policy \
+  --policy-name TransactionSearchXRayAccess \
+  --policy-document "$(cat <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "TransactionSearchXRayAccess",
+      "Effect": "Allow",
+      "Principal": { "Service": "xray.amazonaws.com" },
+      "Action": "logs:PutLogEvents",
+      "Resource": [
+        "arn:aws:logs:${REGION}:${ACCOUNT_ID}:log-group:aws/spans:*",
+        "arn:aws:logs:${REGION}:${ACCOUNT_ID}:log-group:/aws/application-signals/data:*"
+      ],
+      "Condition": {
+        "ArnLike": { "aws:SourceArn": "arn:aws:xray:${REGION}:${ACCOUNT_ID}:*" },
+        "StringEquals": { "aws:SourceAccount": "${ACCOUNT_ID}" }
+      }
+    }
+  ]
+}
+EOF
+)" \
+  --region "$REGION"
+```
+
+With a named profile, add `--profile <name>` to both this and the `sts` call.
+
+**2. Point the trace segment destination at CloudWatch Logs:**
 
 ```bash
 aws xray update-trace-segment-destination --destination CloudWatchLogs --region <your region>
 ```
 
-Then wait for `ACTIVE` before re-running `cdk deploy`. Nothing needs to be rolled back or cleaned up
+**3. Wait for `ACTIVE`** — `aws xray get-trace-segment-destination --region <your region>` — before
+re-running `cdk deploy`. It takes up to ~10 minutes. Nothing needs to be rolled back or cleaned up
 first: the failed stack update leaves no partial delivery behind.
+
+The third of the three settings, the indexing rule, defaults to 1% and needs no action to deploy.
+Check it with `aws xray get-indexing-rules --region <your region>`; raising it for development is
+covered under [The traces exist in the logs but the trace map is empty](#the-traces-exist-in-the-logs-but-the-trace-map-is-empty).
+
+#### Step 2 fails with `AccessDeniedException`
+
+```text
+AccessDeniedException: XRay does not have permission to call PutLogEvents on the aws/spans Log Group.
+Please verify that your CloudWatch Logs Resource Policies are configured correctly
+```
+
+This is **not** a permission problem with your identity, and an administrator sees it too. You are
+allowed to configure X-Ray; the X-Ray service principal itself is not yet allowed to write to the
+`aws/spans` log group. Run step 1, then retry step 2.
+
+AWS reference: [Enable Transaction Search](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/Enable-TransactionSearch.html).
 
 ### The deploy fails with "Not authorized to use the audit operation"
 
@@ -452,16 +536,32 @@ The agreement is **per model, not per provider or per account**, so this returns
 this template, whichever model it names. The error also confirms the id is *valid*: an unknown one
 fails validation long before Marketplace is consulted.
 
-**Fix it once, with an admin identity — not with the runtime role.** Needs AWS CLI 2.27.42+:
+**Diagnose it first**, with an admin identity. Needs AWS CLI 2.27.42+, and the **foundation model**
+id — no `us.`/`eu.`/`apac.`/`global.` prefix, which names an inference profile.
+`npm run preflight` runs this for the model in your `.env`.
 
 ```bash
-# The FOUNDATION MODEL id: no `us.`/`eu.`/`global.` prefix, which names an inference profile.
 MODEL=anthropic.claude-sonnet-5
 REGION=us-east-1
 
 aws bedrock get-foundation-model-availability --model-id $MODEL --region $REGION
-aws bedrock list-foundation-model-agreement-offers --model-id $MODEL --region $REGION
-aws bedrock create-foundation-model-agreement --model-id $MODEL --offer-token <OFFER_TOKEN> --region $REGION
+```
+
+| `agreementAvailability.status` | `authorizationStatus` | Meaning |
+|---|---|---|
+| `AVAILABLE` | `AUTHORIZED` | Ready. If chat still fails, wait about two minutes and retry |
+| `NOT_AVAILABLE` | `AUTHORIZED` | No agreement yet — the steps below |
+| anything | not `AUTHORIZED` | IAM, or an Organization SCP, denies this identity. No agreement fixes that |
+
+**Fix it once, with an admin identity — not with the runtime role.** For Anthropic models, submit the
+[first-time-use form](#you-have-not-filled-out-the-request-form) first: it is the step that gets
+skipped, and the agreement call refuses without it. Then:
+
+```bash
+OFFER_TOKEN=$(aws bedrock list-foundation-model-agreement-offers --model-id $MODEL --region $REGION \
+  --query 'offers[0].offerToken' --output text)
+
+aws bedrock create-foundation-model-agreement --model-id $MODEL --offer-token "$OFFER_TOKEN" --region $REGION
 aws bedrock get-foundation-model-availability --model-id $MODEL --region $REGION
 ```
 
@@ -473,9 +573,59 @@ a geography-scoped inference profile needs this done once, in the source Region.
 Opening the model once in the Bedrock console playground, signed in as someone who holds the
 Marketplace permissions, does the same thing through the same auto-enablement path.
 
-If the agreement call asks for a use-case form, that is Anthropic's First Time Use requirement —
-once per account, or once at an organization's management account, covering every Anthropic model.
-`aws bedrock put-use-case-for-model-access` submits it.
+A brand-new account also needs a valid payment method on file: Marketplace bills through it.
+
+#### `You have not filled out the request form`
+
+If `create-foundation-model-agreement` fails with:
+
+```text
+AccessDeniedException: You have not filled out the request form.
+Fill out the form before getting access.
+```
+
+Anthropic asks for first-time-use details before any of its models can be enabled — once per account,
+or once at the Organization's management account, whose submission member accounts inherit. It is
+what a `NOT_AVAILABLE` agreement beside an `AUTHORIZED` status usually means on an account that has
+never used an Anthropic model. It applies to `bedrock-runtime`, which is what the agent calls, and not
+to the `bedrock-mantle` endpoint. Selecting an Anthropic model in the Bedrock console catalog prompts
+for the same form.
+
+```bash
+cat > anthropic-ftu.json <<'EOF'
+{
+  "companyName": "<your company or project>",
+  "companyWebsite": "https://github.com/<you-or-your-project>",
+  "intendedUsers": "0",
+  "industryOption": "Technology",
+  "otherIndustryOption": "",
+  "useCases": "<what this deployment is for>"
+}
+EOF
+
+aws bedrock put-use-case-for-model-access --form-data fileb://anthropic-ftu.json --region $REGION
+aws bedrock get-use-case-for-model-access --region $REGION   # returns the form once it is on file
+```
+
+`intendedUsers` is `0` for internal, `1` for external, `2` for both. A website is required; an
+individual developer can give a GitHub profile or a project URL. Access is granted as soon as the
+submission succeeds. Opt-in Regions need it submitted again. Then continue with the agreement above.
+
+#### Confirm with a real call
+
+Once `AVAILABLE`, a `converse` call proves the model answers, using the id the agent uses — the value
+of `BEDROCK_MODEL_ID`, profile prefix included:
+
+```bash
+aws bedrock-runtime converse \
+  --model-id us.anthropic.claude-sonnet-5 \
+  --messages '[{"role":"user","content":[{"text":"Reply only with: working"}]}]' \
+  --inference-config '{"maxTokens":50,"temperature":0}' \
+  --region $REGION
+```
+
+It runs as **your** identity, so it proves the agreement and not the runtime role's grant — the first
+chat message does that.
 
 **Do not fix this by granting `aws-marketplace:Subscribe` to the runtime role.** AWS is explicit that
 the permission is needed only the first time a model is used in an account, and never afterwards, so

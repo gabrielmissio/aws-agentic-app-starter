@@ -479,3 +479,23 @@ export function resolveBedrockModelId(input?: string): string {
   const trimmed = input?.trim()
   return trimmed && trimmed.length > 0 ? trimmed : DEFAULT_BEDROCK_MODEL_ID
 }
+
+/** The geography prefixes that make a model id a cross-region inference profile rather than a model. */
+const INFERENCE_PROFILE_PREFIXES = ['global', 'us', 'eu', 'apac']
+
+/**
+ * Splits `BEDROCK_MODEL_ID` into what it names: the foundation model, and whether it got there
+ * through an inference profile. The two are different resources — IAM has to grant both ARNs, and
+ * the Marketplace agreement, the use-case form and `get-foundation-model-availability` all speak in
+ * the foundation model's id and reject the profile's. One parser, so the grant and the checks that
+ * predict whether it will work cannot disagree about which model is meant.
+ */
+export function parseBedrockModelId(modelId: string): {
+  foundationModelId: string
+  isInferenceProfile: boolean
+} {
+  const [prefix, ...rest] = modelId.split('.')
+  const isInferenceProfile = rest.length > 0 && INFERENCE_PROFILE_PREFIXES.includes(prefix as string)
+
+  return { foundationModelId: isInferenceProfile ? rest.join('.') : modelId, isInferenceProfile }
+}
